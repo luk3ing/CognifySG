@@ -13,7 +13,7 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-TOKEN         = os.environ.get("TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN         = os.environ.get("TOKEN")
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
 # ── KEEPALIVE SERVER ───────────────────────────────────────────────────────────

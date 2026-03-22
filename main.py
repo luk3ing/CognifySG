@@ -3,13 +3,13 @@ CognifySG — Telegram Tuition Agency Bot
 Connects tutors and parents. Admin manually matches via WhatsApp.
 
 Setup:
-1. pip install python-telegram-bot==20.7
+1. pip install python-telegram-bot==21.3
 2. Get token from @BotFather on Telegram
 3. Get your ADMIN_CHAT_ID from @userinfobot on Telegram
 4. Set TOKEN and ADMIN_CHAT_ID below
 5. python main.py
 """
-
+import asyncio
 import os
 import sqlite3
 import threading
@@ -706,7 +706,7 @@ def main():
     app.add_handler(CallbackQueryHandler(back_parent,     pattern="^back_parent$"))
 
     print("CognifySG bot is running!")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()

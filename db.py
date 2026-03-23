@@ -11,8 +11,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set! Check Railway variables.")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+```
 
+Commit changes. Railway redeploys — now the logs will either show a clear `DATABASE_URL is not set!` error or actually connect.
+
+---
+
+**Also double-check in Railway → worker service → Variables → Raw Editor:**
+
+The line should look exactly like:
+```
+DATABASE_URL=${{Postgres.DATABASE_URL}}
 _pool = None
 
 def get_pool():

@@ -1996,6 +1996,7 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except Exception:
             failed += 1
+        await asyncio.sleep(0.1)  # Small delay to avoid hitting rate limits
 
     await status_msg.edit_text(
         hdr("✅", "Broadcast Complete") + f"\n\n"
@@ -2004,9 +2005,10 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ── MAIN ───────────────────────────────────────────────────────────────────────
+# ── POST INIT ─────────────────────────────────────────────────────────────────
+async def post_init(app: Application):
     """Set bot commands so Telegram shows the menu button automatically."""
-    from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
+    from telegram import BotCommand
     user_commands = [
         BotCommand("start",          "Open main menu"),
         BotCommand("profile",        "View your profile"),
@@ -2018,7 +2020,7 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await app.bot.set_my_commands(user_commands)
     logger.info("Bot commands registered.")
 
-
+# ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
     db.init_db()
     db.execute(

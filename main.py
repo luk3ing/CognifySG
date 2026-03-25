@@ -1,8 +1,6 @@
 """
 CognifySG — Production Bot v6
-Full feature set: PostgreSQL, error handling, smart matching,
-confirm match, /open command, T&Cs, PDPA, Google Sheets sync
-python-telegram-bot==21.6
+Improved UI: start button, new commands, shorter dividers, cancel option.
 """
 
 import os
@@ -13,7 +11,7 @@ import threading
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler
@@ -21,33 +19,6 @@ from telegram.ext import (
 
 import db
 import sheets
-# ────WELCOME ────────────────────────────────────────────────────────────────────
-# At the top of main.py, after imports, add a handler for any message
-async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message with a Start button for new users."""
-    uid = update.effective_user.id
-    # If user already accepted terms, ignore (they are in the flow)
-    if db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
-        return
-    # If user is in a conversation, ignore
-    if ctx.user_data:
-        return
-    # Send welcome with inline start button
-    kb = [[InlineKeyboardButton("▶️ Start", callback_data="start_welcome")]]
-    await update.message.reply_text(
-        hdr("🎓", "Welcome to CognifySG") + "\n\n"
-        "Singapore's trusted tuition matching platform.\n\n"
-        "Tap *Start* to begin your journey.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-
-# Then add a handler for "start_welcome" callback
-async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    # Call the same start logic as /start
-    await start(update, ctx)  # need to pass proper update object; we'll adjust
 
 # ── LOGGING ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -75,21 +46,9 @@ ALL_LEVELS   = ["Primary 1-3","Primary 4-6","Lower Sec","Upper Sec",
                 "JC","IB/IP","Poly/ITE"]
 ALL_AREAS    = ["North","South","East","West","Central","Online"]
 
-# ── KEEPALIVE ──────────────────────────────────────────────────────────────────
-class _KA(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers()
-        self.wfile.write(b"CognifySG v6 running!")
-    def log_message(self, *a): pass
-
-threading.Thread(
-    target=lambda: HTTPServer(("0.0.0.0", 8080), _KA).serve_forever(),
-    daemon=True
-).start()
-
-# ── UI ─────────────────────────────────────────────────────────────────────────
-DIV  = "━━━━━━━━━━━━━━━━━━━━"
-DIV2 = "──────────────────────"
+# ── UI CONSTANTS (SHORTENED) ───────────────────────────────────────────────────
+DIV  = "────────"   # 8 dashes
+DIV2 = "──────"     # 6 dashes
 
 def hdr(icon, title):   return icon + "  *" + title + "*\n" + DIV
 def fld(label, value):  return "▸ *" + label + ":* " + str(value)
@@ -105,18 +64,38 @@ def ms_kb(options, selected, prefix):
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("Confirm Selection ✅", callback_data=prefix + "|DONE")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])  # Added cancel
     return InlineKeyboardMarkup(rows)
+
+# ── KEEPALIVE ──────────────────────────────────────────────────────────────────
+class _KA(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"CognifySG v6 running!")
+    def log_message(self, *a): pass
+
+threading.Thread(
+    target=lambda: HTTPServer(("0.0.0.0", 8080), _KA).serve_forever(),
+    daemon=True
+).start()
 
 # ── ADMIN HELPERS ──────────────────────────────────────────────────────────────
 def get_admins():
     rows = db.execute("SELECT user_id FROM admins", fetch="all")
-    return [r["user_id"] for r in rows] if rows else [SUPER_ADMIN_ID]
+    admins = [r["user_id"] for r in rows] if rows else []
+    if SUPER_ADMIN_ID not in admins:
+        admins.append(SUPER_ADMIN_ID)
+    return admins
 
 def is_admin(uid):
     return bool(db.execute("SELECT 1 FROM admins WHERE user_id=%s", (uid,), fetch="one"))
 
 async def notify_admins(bot, text, markup=None):
-    for aid in get_admins():
+    admins = get_admins()
+    if not admins:
+        logger.warning("No admins registered. Set ADMIN_CHAT_ID env var.")
+        return
+    for aid in admins:
         try:
             await bot.send_message(aid, text, reply_markup=markup, parse_mode="Markdown")
         except Exception as e:
@@ -206,29 +185,19 @@ def gen_captcha():
     opts  = wrong + [ans]; random.shuffle(opts)
     return a, b, ans, opts
 
-# ── /START ─────────────────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.clear()
-    uid = update.effective_user.id
-
-    if db.execute("SELECT 1 FROM blocked WHERE user_id=%s", (uid,), fetch="one"):
-        await update.message.reply_text(
-            hdr("🚫", "Access Denied") + "\n\n"
-            "Your account has been restricted.\n"
-            "_Contact support if you believe this is an error._",
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
-
-    if not db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
-        kb = [[
-            InlineKeyboardButton("📄 Read Terms", url=TERMS_URL),
-            InlineKeyboardButton("🔒 Privacy Policy", url=PRIVACY_URL),
-        ], [
-            InlineKeyboardButton("✅  I agree to the Terms & Privacy Policy",
-                                 callback_data="terms_accept")
-        ]]
-        await update.message.reply_text(
+# ── START ENTRY (refactored to work with both /start and button) ──────────────
+async def send_terms(user_id, bot):
+    """Send the terms message to a user (used by both /start and button)."""
+    kb = [[
+        InlineKeyboardButton("📄 Read Terms", url=TERMS_URL),
+        InlineKeyboardButton("🔒 Privacy Policy", url=PRIVACY_URL),
+    ], [
+        InlineKeyboardButton("✅  I agree to the Terms & Privacy Policy",
+                             callback_data="terms_accept")
+    ]]
+    try:
+        await bot.send_message(
+            user_id,
             hdr("📋", "Terms of Service") + "\n\n"
             "Before using *CognifySG*, please read and accept our Terms of Service and Privacy Policy.\n\n" +
             DIV2 + "\n"
@@ -242,9 +211,81 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="Markdown"
         )
+    except Exception as e:
+        logger.error("Failed to send terms to %s: %s", user_id, e)
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Entry point for /start command."""
+    uid = update.effective_user.id
+    if db.execute("SELECT 1 FROM blocked WHERE user_id=%s", (uid,), fetch="one"):
+        await update.message.reply_text(
+            hdr("🚫", "Access Denied") + "\n\n"
+            "Your account has been restricted.\n"
+            "_Contact support if you believe this is an error._",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    if not db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
+        await send_terms(uid, update.get_bot())
         return TERMS
     return await show_captcha(update, ctx)
 
+async def start_welcome_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle the inline 'Start' button."""
+    q = update.callback_query
+    await q.answer()
+    await q.message.delete()  # remove the welcome message
+    # Now start the real flow
+    uid = q.from_user.id
+    if db.execute("SELECT 1 FROM blocked WHERE user_id=%s", (uid,), fetch="one"):
+        await q.message.reply_text(
+            hdr("🚫", "Access Denied") + "\n\n"
+            "Your account has been restricted.\n"
+            "_Contact support if you believe this is an error._",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    if not db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
+        await send_terms(uid, ctx.bot)
+        return TERMS
+    # If already accepted, just go to captcha
+    a, b, ans, opts = gen_captcha()
+    ctx.user_data.update({"captcha_ans": ans, "ca": a, "cb": b, "cattempts": 0})
+    kb = [[InlineKeyboardButton(str(o), callback_data="cap|" + str(o)) for o in opts]]
+    await ctx.bot.send_message(
+        uid,
+        hdr("🔐", "Security Verification") + "\n\n"
+        "Please confirm you are human.\n\n" +
+        DIV2 + "\n❓  *What is  " + str(a) + " + " + str(b) + "?*\n" + DIV2,
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return CAPTCHA
+
+# ── WELCOME HANDLER (for new users) ───────────────────────────────────────────
+async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send a welcome message with Start button for users who haven't started."""
+    uid = update.effective_user.id
+    if db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
+        # User already accepted terms, they are probably in a conversation or just idle
+        # We can ignore or show a help message.
+        await update.message.reply_text(
+            "Welcome back! Use /start to open the main menu."
+        )
+        return
+    # New user: show welcome with start button
+    kb = [[InlineKeyboardButton("▶️ Start", callback_data="start_welcome")]]
+    await update.message.reply_text(
+        hdr("🎓", "Welcome to CognifySG") + "\n\n"
+        "Singapore's trusted tuition matching platform.\n\n"
+        "Tap *Start* to begin your journey.",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+
+# ── TERMS ACCEPT ──────────────────────────────────────────────────────────────
 async def terms_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = q.from_user.id
@@ -818,8 +859,9 @@ async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await q.edit_message_text(
         hdr("✅", "Application Submitted") + "\n\n"
-        "Your application has been received.\n\n" +
-        DIV2 + "\n_Our team will contact you on WhatsApp to confirm the match._",
+        "Your application has been received.\n\n"
+        "Admins will review and contact you if matched.\n\n"
+        f"Use /myapplications to track this request.",
         parse_mode="Markdown"
     )
 
@@ -1282,6 +1324,87 @@ async def back_t(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def back_p(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await parent_menu(update, ctx)
 
+# ── NEW COMMAND HANDLERS ───────────────────────────────────────────────────────
+async def profile_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    if tutor:
+        status = "🟢 Available" if tutor["available"] else "🔴 Unavailable"
+        await update.message.reply_text(
+            hdr("👤", "Your Tutor Profile") + "\n\n" +
+            fld("Name", tutor["name"]) + "\n" +
+            fld("Phone", tutor["phone"]) + "\n" +
+            fld("Subjects", tutor["subjects"]) + "\n" +
+            fld("Levels", tutor["levels"]) + "\n" +
+            fld("Areas", tutor["areas"]) + "\n" +
+            fld("Rate", rate_str(tutor["rate"])) + "\n" +
+            fld("Status", status) + "\n" +
+            fld("Approval", "✅ Approved" if tutor["approved"] else "⏳ Pending"),
+            parse_mode="Markdown"
+        )
+        return
+    # Check if user is a parent
+    parent = db.execute("SELECT * FROM requests WHERE parent_id=%s LIMIT 1", (uid,), fetch="one")
+    if parent:
+        await update.message.reply_text(
+            hdr("👨‍👩‍👧", "Your Parent Profile") + "\n\n" +
+            fld("Name", parent["name"]) + "\n" +
+            fld("Phone", parent["phone"]) + "\n" +
+            fld("Telegram", "@" + (parent["username"] or "none")),
+            parse_mode="Markdown"
+        )
+        return
+    await update.message.reply_text("You are not registered yet. Use /start to begin.")
+
+async def myrequests_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    if tutor:
+        # Show applications
+        apps = db.execute("""
+            SELECT a.request_id, r.subject, r.level, a.match_score, a.created_at
+            FROM applications a
+            JOIN requests r ON r.id = a.request_id
+            WHERE a.tutor_id=%s
+            ORDER BY a.created_at DESC
+        """, (uid,), fetch="all")
+        if not apps:
+            await update.message.reply_text("You haven't applied for any requests.")
+            return
+        lines = [hdr("📋", "Your Applications") + "\n"]
+        for a in apps:
+            lines.append(
+                f"📌 *#{a['request_id']}* — {a['subject']} | {a['level']}\n"
+                f"   Score: {a['match_score']}/100  |  Applied: {a['created_at'].strftime('%d %b')}"
+            )
+        await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+        return
+    # For parents: show requests
+    reqs = db.execute(
+        "SELECT id, subject, level, status, created_at FROM requests WHERE parent_id=%s ORDER BY created_at DESC",
+        (uid,), fetch="all"
+    )
+    if not reqs:
+        await update.message.reply_text("You haven't posted any requests.")
+        return
+    lines = [hdr("📋", "Your Requests") + "\n"]
+    for r in reqs:
+        icon = "✅" if r["status"] == "matched" else "🟡"
+        lines.append(f"{icon}  *#{r['id']}* — {r['subject']} | {r['level']}  ({r['status']})")
+    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+
+async def myapplications_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await myrequests_cmd(update, ctx)
+
+async def cancel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancel current conversation and clear data."""
+    ctx.user_data.clear()
+    await update.message.reply_text(
+        "Operation cancelled. Use /start to begin again.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
     db.init_db()
@@ -1300,7 +1423,7 @@ def main():
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            CallbackQueryHandler(post_req_start, pattern="^post_req$"),
+            CallbackQueryHandler(start_welcome_callback, pattern="^start_welcome$"),
         ],
         states={
             TERMS:      [CallbackQueryHandler(terms_accept, pattern="^terms_accept$")],
@@ -1319,12 +1442,23 @@ def main():
             P_AREA:     [CallbackQueryHandler(p_area,     pattern="^parea\\|")],
             P_BUDGET:   [MessageHandler(filters.TEXT & ~filters.COMMAND, p_budget)],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_cmd),
+            CommandHandler("start", start),
+        ],
         per_message=False,
         allow_reentry=True,
     )
 
     app.add_handler(conv)
+
+    # New commands
+    app.add_handler(CommandHandler("profile", profile_cmd))
+    app.add_handler(CommandHandler("myrequests", myrequests_cmd))
+    app.add_handler(CommandHandler("myapplications", myapplications_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+
+    # Existing commands
     app.add_handler(CommandHandler("open",        open_requests))
     app.add_handler(CommandHandler("applicants",  view_applicants))
     app.add_handler(CommandHandler("admin",       admin_panel))
@@ -1333,6 +1467,8 @@ def main():
     app.add_handler(CommandHandler("listadmins",  list_admins))
     app.add_handler(CommandHandler("deleteaccount", delete_account))
     app.add_handler(CommandHandler("terms",       terms_cmd))
+
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(browse_reqs,       pattern="^browse_reqs$"))
     app.add_handler(CallbackQueryHandler(req_nav,           pattern="^req_(next|prev)$"))
     app.add_handler(CallbackQueryHandler(apply_req,         pattern="^apply_\\d+$"))
@@ -1348,9 +1484,13 @@ def main():
     app.add_handler(CallbackQueryHandler(rej_tutor_cancel,  pattern="^trc_"))
     app.add_handler(CallbackQueryHandler(confirm_delete,    pattern="^confirm_delete$"))
     app.add_handler(CallbackQueryHandler(cancel_delete,     pattern="^cancel_delete$"))
+
+    # Message handler for welcome (must be last)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, welcome))
+
     app.add_error_handler(error_handler)
 
-    logger.info("CognifySG v6 is running!")
+    logger.info("CognifySG v6 is running with improved UI!")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":

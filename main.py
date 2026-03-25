@@ -957,35 +957,19 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     budget = clean_rate(txt)
     u = update.effective_user
 
-    # Show loading indicator
-    msg = await update.message.reply_text("⏳ Processing your request...")
-
-    # Insert into database
-    conn = None
     try:
-        conn = db.db()
-        with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '10s'")
-            cur.execute("""
-                INSERT INTO requests (parent_id,username,name,phone,subject,level,areas,budget,approved) 
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING id
-            """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
-                  ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
-                  ", ".join(ctx.user_data["p_area"]), budget))
-            req_id = cur.fetchone()[0]
-            conn.commit()
+        req_id = db.execute(
+            "INSERT INTO requests (parent_id,username,name,phone,subject,level,areas,budget,approved) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING id",
+            (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
+             ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
+             ", ".join(ctx.user_data["p_area"]), budget),
+            fetch="id"
+        )
     except Exception as e:
-        if conn:
-            conn.rollback()
         logger.error(f"Failed to create request: {e}")
-        await msg.edit_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
+        await update.message.reply_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
         return ConversationHandler.END
-    finally:
-        if conn:
-            db.release(conn)
-
-    # Delete loading message
-    await msg.delete()
 
     # Background tasks (non-blocking)
     asyncio.create_task(log_to_sheets_async(
@@ -1797,7 +1781,244 @@ async def cancel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+async def admin_commands(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all admin commands with descriptions."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    await update.message.reply_text(
+        hdr("⚙️", "Admin Command Reference") + "\n\n"
+        "*── Matching ──*\n"
+        "`/open` — View all open requests with applicant counts\n"
+        "`/applicants ID` — Compare all applicants for a request (ranked by score)\n\n"
+        "*── User Management ──*\n"
+        "`/deleteuser USER_ID` — Permanently delete a user's profile and data\n"
+        "`/banuser USER_ID` — Block a user from the bot\n"
+        "`/unbanuser USER_ID` — Unblock a banned user\n"
+        "`/userinfo USER_ID` — View full profile of any user\n\n"
+        "*── Requests ──*\n"
+        "`/closereq REQUEST_ID` — Manually close/cancel an open request\n\n"
+        "*── Team ──*\n"
+        "`/addadmin USER_ID` — Grant admin access\n"
+        "`/removeadmin USER_ID` — Revoke admin access\n"
+        "`/listadmins` — View full admin team\n\n"
+        "*── Comms ──*\n"
+        "`/broadcast MESSAGE` — Send a message to ALL registered users\n\n"
+        "*── Stats ──*\n"
+        "`/admin` — Dashboard stats\n"
+        "`/commands` — This help menu",
+        parse_mode="Markdown"
+    )
+
+async def delete_user_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: permanently delete a user's data."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/deleteuser USER_ID`", parse_mode="Markdown")
+        return
+    try:
+        uid = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Provide a valid numeric user ID.")
+        return
+    db.execute("DELETE FROM tutors       WHERE user_id=%s",   (uid,))
+    db.execute("DELETE FROM requests     WHERE parent_id=%s", (uid,))
+    db.execute("DELETE FROM applications WHERE tutor_id=%s",  (uid,))
+    db.execute("DELETE FROM terms_accepted WHERE user_id=%s", (uid,))
+    db.execute("DELETE FROM blocked      WHERE user_id=%s",   (uid,))
+    await update.message.reply_text(
+        hdr("✅", "User Deleted") + f"\n\nAll data for user `{uid}` has been permanently removed.",
+        parse_mode="Markdown"
+    )
+
+async def ban_user_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: block a user from the bot."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/banuser USER_ID`", parse_mode="Markdown")
+        return
+    try:
+        uid = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Provide a valid numeric user ID.")
+        return
+    db.execute("INSERT INTO blocked(user_id) VALUES(%s) ON CONFLICT DO NOTHING", (uid,))
+    await update.message.reply_text(
+        hdr("🚫", "User Banned") + f"\n\nUser `{uid}` has been blocked from the bot.",
+        parse_mode="Markdown"
+    )
+    try:
+        await ctx.bot.send_message(uid,
+            "⚠️ Your access to CognifySG has been suspended.\n"
+            "Contact the admin if you believe this is an error.")
+    except Exception:
+        pass
+
+async def unban_user_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: unblock a user."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/unbanuser USER_ID`", parse_mode="Markdown")
+        return
+    try:
+        uid = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Provide a valid numeric user ID.")
+        return
+    db.execute("DELETE FROM blocked WHERE user_id=%s", (uid,))
+    await update.message.reply_text(
+        hdr("✅", "User Unbanned") + f"\n\nUser `{uid}` can now access the bot again.",
+        parse_mode="Markdown"
+    )
+
+async def user_info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: view full profile of any user."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/userinfo USER_ID`", parse_mode="Markdown")
+        return
+    try:
+        uid = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Provide a valid numeric user ID.")
+        return
+
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    if tutor:
+        status   = "🟢 Available" if tutor["available"] else "🔴 Unavailable"
+        approved = "✅ Approved"  if tutor["approved"]  else "⏳ Pending"
+        await update.message.reply_text(
+            hdr("👨‍🏫", f"Tutor Profile — {uid}") + "\n\n" +
+            fld("Name",     tutor["name"])          + "\n" +
+            fld("Phone",    tutor["phone"])          + "\n" +
+            fld("Telegram", "@" + tutor["username"] if tutor["username"] else "none") + "\n" +
+            fld("Subjects", tutor["subjects"])       + "\n" +
+            fld("Levels",   tutor["levels"])         + "\n" +
+            fld("Areas",    tutor["areas"])          + "\n" +
+            fld("Rate",     rate_str(tutor["rate"])) + "\n" +
+            fld("Status",   status)                  + "\n" +
+            fld("Account",  approved)                + "\n" +
+            fld("Rating",   str(tutor["rating_avg"]) + " (" + str(tutor["rating_count"]) + " reviews)" if tutor["rating_count"] else "No ratings"),
+            parse_mode="Markdown"
+        )
+        return
+
+    reqs = db.execute(
+        "SELECT id,subject,level,budget,status FROM requests WHERE parent_id=%s ORDER BY created_at DESC",
+        (uid,), fetch="all"
+    )
+    if reqs:
+        first = db.execute("SELECT name,phone,username FROM requests WHERE parent_id=%s LIMIT 1", (uid,), fetch="one")
+        lines = [hdr("👨‍👩‍👧", f"Parent Profile — {uid}") + "\n\n" +
+                 fld("Name",    first["name"])    + "\n" +
+                 fld("Phone",   first["phone"])   + "\n" +
+                 fld("Telegram","@" + first["username"] if first["username"] else "none") + "\n\n" +
+                 f"*{len(reqs)} request(s):*"]
+        for r in reqs:
+            icon = "✅" if r["status"] == "matched" else "🟡"
+            lines.append(f"{icon} #{r['id']} — {r['subject']} | {rate_str(r['budget'])} | {r['status']}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    await update.message.reply_text(f"⚠️ No profile found for user `{uid}`.", parse_mode="Markdown")
+
+async def close_req_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: manually close an open request."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/closereq REQUEST_ID`", parse_mode="Markdown")
+        return
+    try:
+        req_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Provide a valid request ID.")
+        return
+    req = db.execute("SELECT * FROM requests WHERE id=%s", (req_id,), fetch="one")
+    if not req:
+        await update.message.reply_text(f"⚠️ Request #{req_id} not found.")
+        return
+    db.execute("UPDATE requests SET status='closed' WHERE id=%s", (req_id,))
+    await update.message.reply_text(
+        hdr("🔒", "Request Closed") + f"\n\nRequest #{req_id} has been manually closed.\n"
+        f"Parent: {req['name']} | Subject: {req['subject']}",
+        parse_mode="Markdown"
+    )
+    try:
+        await ctx.bot.send_message(
+            req["parent_id"],
+            hdr("🔒", "Request Closed") + "\n\n"
+            f"Your request for *{req['subject']}* (#{req_id}) has been closed by the admin team.\n\n"
+            "_Use /start to post a new request._",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+
+async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: broadcast a message to ALL users."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Admin access required.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage: `/broadcast YOUR MESSAGE HERE`\n\n"
+            "⚠️ This sends to ALL registered users. Use carefully.",
+            parse_mode="Markdown"
+        )
+        return
+
+    message = " ".join(ctx.args)
+    broadcast_text = (
+        hdr("📢", "CognifySG Announcement") + "\n\n" +
+        message + "\n\n" +
+        DIV2 + "\n_— The CognifySG Team_"
+    )
+
+    tutors  = db.execute("SELECT user_id FROM tutors",            fetch="all") or []
+    parents = db.execute("SELECT DISTINCT parent_id FROM requests", fetch="all") or []
+    all_ids = set([r["user_id"] for r in tutors] + [r["parent_id"] for r in parents])
+
+    sent = failed = 0
+    status_msg = await update.message.reply_text(f"⏳ Broadcasting to {len(all_ids)} users...")
+    for uid in all_ids:
+        try:
+            await ctx.bot.send_message(uid, broadcast_text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await status_msg.edit_text(
+        hdr("✅", "Broadcast Complete") + f"\n\n"
+        f"✅ Sent: {sent}\n❌ Failed: {failed}\n"
+        f"Total: {len(all_ids)} users",
+        parse_mode="Markdown"
+    )
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
+    """Set bot commands so Telegram shows the menu button automatically."""
+    from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
+    user_commands = [
+        BotCommand("start",          "Open main menu"),
+        BotCommand("profile",        "View your profile"),
+        BotCommand("myrequests",     "View your requests / applications"),
+        BotCommand("deleteaccount",  "Delete all your data (PDPA)"),
+        BotCommand("cancel",         "Cancel current operation"),
+        BotCommand("terms",          "View Terms & Privacy Policy"),
+    ]
+    await app.bot.set_my_commands(user_commands)
+    logger.info("Bot commands registered.")
+
+
 def main():
     db.init_db()
     db.execute(
@@ -1805,12 +2026,13 @@ def main():
         (SUPER_ADMIN_ID, SUPER_ADMIN_ID)
     )
 
-    app = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    app = Application.builder().token(TOKEN).concurrent_updates(True).post_init(post_init).build()
 
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
             CallbackQueryHandler(start_welcome_callback, pattern="^start_welcome$"),
+            CallbackQueryHandler(post_req_start, pattern="^post_req$"),
         ],
         states={
             TERMS: [CallbackQueryHandler(terms_accept, pattern="^terms_accept$")],
@@ -1850,14 +2072,21 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_cmd))
 
     # Admin commands
-    app.add_handler(CommandHandler("open", open_requests))
-    app.add_handler(CommandHandler("applicants", view_applicants))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("addadmin", add_admin))
+    app.add_handler(CommandHandler("open",        open_requests))
+    app.add_handler(CommandHandler("applicants",  view_applicants))
+    app.add_handler(CommandHandler("admin",       admin_panel))
+    app.add_handler(CommandHandler("commands",    admin_commands))
+    app.add_handler(CommandHandler("addadmin",    add_admin))
     app.add_handler(CommandHandler("removeadmin", remove_admin))
-    app.add_handler(CommandHandler("listadmins", list_admins))
+    app.add_handler(CommandHandler("listadmins",  list_admins))
+    app.add_handler(CommandHandler("deleteuser",  delete_user_cmd))
+    app.add_handler(CommandHandler("banuser",     ban_user_cmd))
+    app.add_handler(CommandHandler("unbanuser",   unban_user_cmd))
+    app.add_handler(CommandHandler("userinfo",    user_info_cmd))
+    app.add_handler(CommandHandler("closereq",    close_req_cmd))
+    app.add_handler(CommandHandler("broadcast",   broadcast_cmd))
     app.add_handler(CommandHandler("deleteaccount", delete_account))
-    app.add_handler(CommandHandler("terms", terms_cmd))
+    app.add_handler(CommandHandler("terms",       terms_cmd))
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(browse_reqs, pattern="^browse_reqs$"))

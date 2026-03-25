@@ -1,7 +1,6 @@
 """
 CognifySG — Production Bot v6
-Enhanced UI: edit profile for tutors, applied postings, multiple parent requests,
-back buttons, and improved error handling.
+Optimized: async operations, back buttons, faster responses
 """
 
 import os
@@ -10,6 +9,7 @@ import random
 import logging
 import threading
 import traceback
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -110,7 +110,6 @@ async def error_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     err   = ctx.error
     trace = "".join(traceback.format_exception(type(err), err, err.__traceback__))
     uid   = update.effective_user.id if update and update.effective_user else 0
-    handler_name = ctx.update_queue.qsize()
 
     logger.error("Unhandled exception for user %s: %s", uid, err)
 
@@ -192,7 +191,6 @@ def gen_captcha():
 
 # ── START ENTRY ────────────────────────────────────────────────────────────────
 async def send_terms(user_id, bot):
-    """Send the terms message to a user (used by both /start and button)."""
     kb = [[
         InlineKeyboardButton("📄 Read Terms", url=TERMS_URL),
         InlineKeyboardButton("🔒 Privacy Policy", url=PRIVACY_URL),
@@ -220,7 +218,6 @@ async def send_terms(user_id, bot):
         logger.error("Failed to send terms to %s: %s", user_id, e)
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Entry point for /start command."""
     uid = update.effective_user.id
     if db.execute("SELECT 1 FROM blocked WHERE user_id=%s", (uid,), fetch="one"):
         await update.message.reply_text(
@@ -237,11 +234,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await show_captcha(update, ctx)
 
 async def start_welcome_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle the inline 'Start' button."""
     q = update.callback_query
     await q.answer()
-    await q.message.delete()  # remove the welcome message
-    # Now start the real flow
+    await q.message.delete()
     uid = q.from_user.id
     if db.execute("SELECT 1 FROM blocked WHERE user_id=%s", (uid,), fetch="one"):
         await q.message.reply_text(
@@ -255,7 +250,6 @@ async def start_welcome_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if not db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
         await send_terms(uid, ctx.bot)
         return TERMS
-    # If already accepted, just go to captcha
     a, b, ans, opts = gen_captcha()
     ctx.user_data.update({"captcha_ans": ans, "ca": a, "cb": b, "cattempts": 0})
     kb = [[InlineKeyboardButton(str(o), callback_data="cap|" + str(o)) for o in opts]]
@@ -269,18 +263,11 @@ async def start_welcome_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     )
     return CAPTCHA
 
-# ── WELCOME HANDLER ───────────────────────────────────────────────────────────
 async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message with Start button for users who haven't started."""
     uid = update.effective_user.id
     if db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
-        # User already accepted terms, they are probably in a conversation or just idle
-        # We can ignore or show a help message.
-        await update.message.reply_text(
-            "Welcome back! Use /start to open the main menu."
-        )
+        await update.message.reply_text("Welcome back! Use /start to open the main menu.")
         return
-    # New user: show welcome with start button
     kb = [[InlineKeyboardButton("▶️ Start", callback_data="start_welcome")]]
     await update.message.reply_text(
         hdr("🎓", "Welcome to CognifySG") + "\n\n"
@@ -290,7 +277,6 @@ async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ── TERMS ACCEPT ──────────────────────────────────────────────────────────────
 async def terms_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = q.from_user.id
@@ -331,13 +317,11 @@ async def captcha_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     
-    # Safely check callback data
     callback_data = q.data
     if not callback_data or not callback_data.startswith("cap|"):
         await q.answer("Invalid selection.", show_alert=True)
         return CAPTCHA
     
-    # Extract the chosen number
     parts = callback_data.split("|")
     if len(parts) < 2:
         await q.answer("Invalid format.", show_alert=True)
@@ -389,7 +373,6 @@ async def captcha_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return CAPTCHA
 
-# ── ROLE SELECT ────────────────────────────────────────────────────────────────
 async def role_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.data == "role_tutor":
@@ -410,12 +393,11 @@ async def role_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return T_NAME
     return await parent_menu(update, ctx)
 
-# ── TUTOR REGISTRATION ─────────────────────────────────────────────────────────
+# ── TUTOR REGISTRATION (unchanged but included) ───────────────────────────────
 async def t_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_name(txt):
-        await update.message.reply_text(
-            "⚠️  *Invalid name.* Letters only, min 2 characters.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️  *Invalid name.* Letters only, min 2 characters.", parse_mode="Markdown")
         return T_NAME
     ctx.user_data["t_name"] = txt
     await update.message.reply_text(
@@ -429,20 +411,15 @@ async def t_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def t_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_phone(txt):
-        await update.message.reply_text(
-            "⚠️  *Invalid number.* 8 digits starting with 8 or 9.\n_Example: `91234567`_",
-            parse_mode="Markdown")
+        await update.message.reply_text("⚠️  *Invalid number.* 8 digits starting with 8 or 9.\n_Example: `91234567`_", parse_mode="Markdown")
         return T_PHONE
     if db.execute("SELECT 1 FROM tutors WHERE phone=%s", (txt,), fetch="one"):
-        await update.message.reply_text(
-            "⚠️  This phone number is already registered.\n_Each number can only be used once._",
-            parse_mode="Markdown")
+        await update.message.reply_text("⚠️  This phone number is already registered.\n_Each number can only be used once._", parse_mode="Markdown")
         return T_PHONE
-    ctx.user_data["t_phone"]    = txt
+    ctx.user_data["t_phone"] = txt
     ctx.user_data["t_subjects"] = []
     await update.message.reply_text(
-        hdr("📚", "Subjects") + "\n\n_Step 3 of 5_\n\n"
-        "Select *all subjects* you teach:",
+        hdr("📚", "Subjects") + "\n\n_Step 3 of 5_\n\nSelect *all subjects* you teach:",
         reply_markup=ms_kb(ALL_SUBJECTS, [], "tsubj"),
         parse_mode="Markdown"
     )
@@ -512,12 +489,10 @@ async def t_areas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def t_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_rate(txt):
-        await update.message.reply_text(
-            "⚠️  *Invalid rate.* Enter a number between 15 and 500.\n_Example: `35`_",
-            parse_mode="Markdown")
+        await update.message.reply_text("⚠️  *Invalid rate.* Enter a number between 15 and 500.\n_Example: `35`_", parse_mode="Markdown")
         return T_RATE
     rate = clean_rate(txt)
-    u    = update.effective_user
+    u = update.effective_user
     ctx.user_data["t_rate"] = rate
 
     auto_approve = 15 <= rate <= 150
@@ -532,10 +507,16 @@ async def t_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
          ", ".join(ctx.user_data["t_areas"]), rate, 1 if auto_approve else 0)
     )
 
-    sheets.log_tutor(u.id, ctx.user_data["t_name"], ctx.user_data["t_phone"],
-                     u.username or "", ", ".join(ctx.user_data["t_subjects"]),
-                     ", ".join(ctx.user_data["t_levels"]),
-                     ", ".join(ctx.user_data["t_areas"]), rate)
+    # Run sheets logging in background
+    async def log_tutor_sheet():
+        try:
+            sheets.log_tutor(u.id, ctx.user_data["t_name"], ctx.user_data["t_phone"],
+                           u.username or "", ", ".join(ctx.user_data["t_subjects"]),
+                           ", ".join(ctx.user_data["t_levels"]),
+                           ", ".join(ctx.user_data["t_areas"]), rate)
+        except Exception as e:
+            logger.error("Sheets tutor log failed: %s", e)
+    asyncio.create_task(log_tutor_sheet())
 
     handle = "@" + u.username if u.username else "No username"
     kb = [[
@@ -554,10 +535,10 @@ async def t_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fld("Rate",     rate_str(rate))                            + "\n\n" +
         DIV2 + "\n_Action required: Approve or reject._"
     )
-    await notify_admins(update.get_bot(), msg, InlineKeyboardMarkup(kb) if not auto_approve else None)
+    asyncio.create_task(notify_admins(update.get_bot(), msg, InlineKeyboardMarkup(kb) if not auto_approve else None))
 
     if auto_approve:
-        sheets.approve_tutor_sheet(u.id)
+        asyncio.create_task(log_to_sheets_async(sheets.approve_tutor_sheet, u.id))
         await update.message.reply_text(
             hdr("✅", "Profile Approved") + "\n\n"
             "Your profile has been *automatically approved!*\n\n" +
@@ -577,7 +558,7 @@ async def t_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# ── TUTOR MENU (with new buttons) ─────────────────────────────────────────────
+# ── TUTOR MENU ────────────────────────────────────────────────────────────────
 async def tutor_menu_msg(update, ctx):
     row = db.execute("SELECT available FROM tutors WHERE user_id=%s",
                      (update.effective_user.id,), fetch="one")
@@ -609,13 +590,11 @@ async def tutor_menu(update, ctx):
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return ConversationHandler.END
 
-# ── APPLIED POSTINGS (for tutors) ─────────────────────────────────────────────
 async def applied_postings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
 
-    # Get all applications with request details
     apps = db.execute("""
         SELECT a.request_id, r.subject, r.level, a.match_score, r.status, a.created_at
         FROM applications a
@@ -646,7 +625,7 @@ async def applied_postings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append("_Tap /start to return to dashboard_")
     await q.edit_message_text("\n\n".join(lines), parse_mode="Markdown")
 
-# ── EDIT TUTOR PROFILE ────────────────────────────────────────────────────────
+# ── EDIT TUTOR PROFILE (simplified) ───────────────────────────────────────────
 async def edit_profile_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -714,7 +693,6 @@ async def edit_subjects_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not sel:
             await q.answer("Pick at least one subject!", show_alert=True)
             return EDIT_SUBJECTS
-        # Update database
         uid = q.from_user.id
         db.execute("UPDATE tutors SET subjects=%s WHERE user_id=%s",
                    (", ".join(sel), uid))
@@ -829,15 +807,12 @@ async def update_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def update_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_phone(txt):
-        await update.message.reply_text(
-            "⚠️  *Invalid number.* 8 digits starting with 8 or 9.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️  *Invalid number.* 8 digits starting with 8 or 9.", parse_mode="Markdown")
         return EDIT_PHONE
     uid = update.effective_user.id
-    # Check if phone is already used by another tutor
     existing = db.execute("SELECT user_id FROM tutors WHERE phone=%s AND user_id!=%s", (txt, uid), fetch="one")
     if existing:
-        await update.message.reply_text(
-            "⚠️  This phone number is already registered to another account.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️  This phone number is already registered to another account.", parse_mode="Markdown")
         return EDIT_PHONE
     db.execute("UPDATE tutors SET phone=%s WHERE user_id=%s", (txt, uid))
     await update.message.reply_text(
@@ -849,8 +824,7 @@ async def update_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def update_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_rate(txt):
-        await update.message.reply_text(
-            "⚠️  *Invalid rate.* Enter a number between 15 and 500.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️  *Invalid rate.* Enter a number between 15 and 500.", parse_mode="Markdown")
         return EDIT_RATE
     rate = clean_rate(txt)
     uid = update.effective_user.id
@@ -861,11 +835,12 @@ async def update_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return await edit_profile_menu(update, ctx)
 
-# ── PARENT FLOW ────────────────────────────────────────────────────────────────
+# ── PARENT FLOW (OPTIMIZED) ───────────────────────────────────────────────────
 async def parent_menu(update, ctx):
     kb = [
         [InlineKeyboardButton("📝  Post a Request", callback_data="post_req")],
         [InlineKeyboardButton("📋  My Requests",    callback_data="my_reqs")],
+        [InlineKeyboardButton("🔙  Back", callback_data="back_to_start")],
     ]
     text = hdr("👨‍👩‍👧", "Parent Dashboard") + "\n\nWelcome to *CognifySG.*\n\n" + DIV2 + "\n_Select an option:_"
     if update.callback_query:
@@ -876,8 +851,10 @@ async def parent_menu(update, ctx):
 
 async def post_req_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
+    kb = [[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]
     await q.edit_message_text(
         hdr("📝", "New Tutor Request") + "\n\n_Step 1 of 5_  —  Enter your *full name:*",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
     return P_NAME
@@ -888,10 +865,12 @@ async def p_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️  *Invalid name.* Letters only, min 2 characters.", parse_mode="Markdown")
         return P_NAME
     ctx.user_data["p_name"] = txt
+    kb = [[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]
     await update.message.reply_text(
         hdr("📱", "WhatsApp Number") + "\n\n_Step 2 of 5_\n\n"
         "Enter your *8-digit SG WhatsApp number.*\n\n" +
         DIV2 + "\n✳️  Starts with 8 or 9\n✳️  No country code",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
     return P_PHONE
@@ -902,7 +881,7 @@ async def p_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️  *Invalid number.* 8 digits starting with 8 or 9.", parse_mode="Markdown")
         return P_PHONE
-    ctx.user_data["p_phone"]   = txt
+    ctx.user_data["p_phone"] = txt
     ctx.user_data["p_subject"] = []
     await update.message.reply_text(
         hdr("📚", "Subject Required") + "\n\n_Step 3 of 5_\n\nSelect subject(s):",
@@ -972,6 +951,12 @@ async def p_area(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_reply_markup(reply_markup=ms_kb(ALL_AREAS, sel, "parea"))
     return P_AREA
 
+async def log_to_sheets_async(func, *args):
+    """Run sheets operations in thread pool to avoid blocking"""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: func(*args))
+
+# OPTIMIZED P_BUDGET WITH BACK BUTTON AND ASYNC OPERATIONS
 async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_rate(txt):
@@ -980,25 +965,49 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return P_BUDGET
 
     budget = clean_rate(txt)
-    u      = update.effective_user
+    u = update.effective_user
 
-    req_id = db.execute(
-        "INSERT INTO requests (parent_id,username,name,phone,subject,level,areas,budget,approved) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING id",
-        (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
-         ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
-         ", ".join(ctx.user_data["p_area"]), budget),
-        fetch="id"
-    )
+    # Show loading indicator
+    msg = await update.message.reply_text("⏳ Processing your request...")
 
-    sheets.log_request(req_id, ctx.user_data["p_name"], ctx.user_data["p_phone"],
-                       u.username or "", ", ".join(ctx.user_data["p_subject"]),
-                       ", ".join(ctx.user_data["p_level"]),
-                       ", ".join(ctx.user_data["p_area"]), budget)
-    sheets.approve_request_sheet(req_id)
+    # Use a single transaction with timeout
+    conn = None
+    try:
+        conn = db.db()
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '10s'")
+            cur.execute("""
+                INSERT INTO requests (parent_id,username,name,phone,subject,level,areas,budget,approved) 
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING id
+            """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
+                  ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
+                  ", ".join(ctx.user_data["p_area"]), budget))
+            req_id = cur.fetchone()[0]
+            conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error("Failed to create request: %s", e)
+        await msg.edit_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
+        return ConversationHandler.END
+    finally:
+        if conn:
+            db.release(conn)
 
+    # Delete loading message
+    await msg.delete()
+
+    # Run sheets logging in background (non-blocking)
+    asyncio.create_task(log_to_sheets_async(
+        sheets.log_request, req_id, ctx.user_data["p_name"], ctx.user_data["p_phone"],
+        u.username or "", ", ".join(ctx.user_data["p_subject"]),
+        ", ".join(ctx.user_data["p_level"]), ", ".join(ctx.user_data["p_area"]), budget
+    ))
+    asyncio.create_task(log_to_sheets_async(sheets.approve_request_sheet, req_id))
+
+    # Notify admins in background
     handle = "@" + u.username if u.username else "No username"
-    msg = (
+    msg_text = (
         hdr("🆕", "New Parent Request") + "\n\n" +
         fld("Name",     ctx.user_data["p_name"])              + "\n" +
         fld("WhatsApp", ctx.user_data["p_phone"])             + "\n" +
@@ -1009,8 +1018,11 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fld("Budget",   rate_str(budget))                      + "\n\n" +
         DIV2 + "\n_Request #" + str(req_id) + " — auto-approved and live._"
     )
-    await notify_admins(update.get_bot(), msg)
+    asyncio.create_task(notify_admins(update.get_bot(), msg_text))
 
+    # Add back button to success message
+    kb = [[InlineKeyboardButton("🔙  Back to Dashboard", callback_data="back_p")]]
+    
     await update.message.reply_text(
         hdr("✅", "Request Live") + "\n\n"
         "Your request is now *live* and visible to tutors.\n\n" +
@@ -1019,6 +1031,7 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fld("Area",    ", ".join(ctx.user_data["p_area"]))    + "\n" +
         fld("Budget",  rate_str(budget))                      + "\n\n" +
         DIV2 + "\nOur team will contact you on *WhatsApp* once a tutor is matched.",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
     return ConversationHandler.END
@@ -1027,7 +1040,7 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def browse_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = q.from_user.id
-    t   = db.execute("SELECT approved FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    t = db.execute("SELECT approved FROM tutors WHERE user_id=%s", (uid,), fetch="one")
     if not t or not t["approved"]:
         await q.edit_message_text(
             hdr("⏳", "Access Restricted") + "\n\nYour profile is pending admin approval.",
@@ -1036,14 +1049,11 @@ async def browse_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Get open requests that the tutor has NOT applied to
     reqs = db.execute("""
         SELECT id, subject, level, areas, budget
         FROM requests
         WHERE status='open' AND approved=1
-          AND id NOT IN (
-              SELECT request_id FROM applications WHERE tutor_id=%s
-          )
+          AND id NOT IN (SELECT request_id FROM applications WHERE tutor_id=%s)
         ORDER BY created_at DESC
     """, (uid,), fetch="all")
 
@@ -1056,15 +1066,15 @@ async def browse_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     ctx.user_data["rlist"] = [dict(r) for r in reqs]
-    ctx.user_data["ridx"]  = 0
+    ctx.user_data["ridx"] = 0
     await show_req_card(q, ctx)
 
 async def show_req_card(q, ctx):
     reqs = ctx.user_data["rlist"]
-    idx  = ctx.user_data["ridx"]
-    r    = reqs[idx]
-    nav  = []
-    if idx > 0:              nav.append(InlineKeyboardButton("◀  Prev", callback_data="req_prev"))
+    idx = ctx.user_data["ridx"]
+    r = reqs[idx]
+    nav = []
+    if idx > 0: nav.append(InlineKeyboardButton("◀  Prev", callback_data="req_prev"))
     if idx < len(reqs) - 1: nav.append(InlineKeyboardButton("Next  ▶", callback_data="req_next"))
     kb = []
     if nav: kb.append(nav)
@@ -1089,15 +1099,16 @@ async def req_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    req_id   = int(q.data.replace("apply_", ""))
+    req_id = int(q.data.replace("apply_", ""))
     tutor_id = q.from_user.id
 
     if db.execute("SELECT 1 FROM applications WHERE tutor_id=%s AND request_id=%s",
                   (tutor_id, req_id), fetch="one"):
-        await q.answer("⚠️  You already applied for this.", show_alert=True); return
+        await q.answer("⚠️  You already applied for this.", show_alert=True)
+        return
 
-    tutor = db.execute("SELECT * FROM tutors   WHERE user_id=%s", (tutor_id,), fetch="one")
-    req   = db.execute("SELECT * FROM requests WHERE id=%s",      (req_id,),   fetch="one")
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (tutor_id,), fetch="one")
+    req = db.execute("SELECT * FROM requests WHERE id=%s", (req_id,), fetch="one")
     if not tutor or not req:
         return
 
@@ -1110,10 +1121,10 @@ async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     app_count = db.execute(
         "SELECT COUNT(*) as n FROM applications WHERE request_id=%s", (req_id,), fetch="one"
     )["n"]
-    sheets.update_applicant_count(req_id, app_count)
+    asyncio.create_task(log_to_sheets_async(sheets.update_applicant_count, req_id, app_count))
 
     t_handle = "@" + tutor["username"] if tutor["username"] else "No username"
-    p_handle = "@" + req["username"]   if req["username"]   else "No username"
+    p_handle = "@" + req["username"] if req["username"] else "No username"
     kb_match = [[InlineKeyboardButton(
         "✅  Confirm Match — #" + str(req_id) + " + " + tutor["name"],
         callback_data="confirm_match_" + str(req_id) + "_" + str(tutor_id)
@@ -1141,13 +1152,13 @@ async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         DIV2 + "\n_Total applicants: " + str(app_count) +
         " — use /applicants " + str(req["id"]) + " to compare all._"
     )
-    await notify_admins(ctx.bot, msg, InlineKeyboardMarkup(kb_match))
+    asyncio.create_task(notify_admins(ctx.bot, msg, InlineKeyboardMarkup(kb_match)))
 
     await q.edit_message_text(
         hdr("✅", "Application Submitted") + "\n\n"
         "Your application has been received.\n\n"
         "Admins will review and contact you if matched.\n\n"
-        f"Use /myapplications or the 'Applied Postings' button to track this request.",
+        "Use /myapplications or the 'Applied Postings' button to track this request.",
         parse_mode="Markdown"
     )
 
@@ -1155,20 +1166,23 @@ async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def confirm_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not is_admin(update.effective_user.id):
-        await q.answer("⛔️  Admin only.", show_alert=True); return
+        await q.answer("⛔️  Admin only.", show_alert=True)
+        return
 
-    parts    = q.data.replace("confirm_match_", "").split("_")
-    req_id   = int(parts[0])
+    parts = q.data.replace("confirm_match_", "").split("_")
+    req_id = int(parts[0])
     tutor_id = int(parts[1])
-    actor    = update.effective_user.username or str(update.effective_user.id)
+    actor = update.effective_user.username or str(update.effective_user.id)
 
-    req   = db.execute("SELECT * FROM requests WHERE id=%s",      (req_id,),   fetch="one")
-    tutor = db.execute("SELECT * FROM tutors   WHERE user_id=%s", (tutor_id,), fetch="one")
+    req = db.execute("SELECT * FROM requests WHERE id=%s", (req_id,), fetch="one")
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (tutor_id,), fetch="one")
     if not req or not tutor:
-        await q.answer("Record not found.", show_alert=True); return
+        await q.answer("Record not found.", show_alert=True)
+        return
 
     if req["status"] == "matched":
-        await q.answer("⚠️  Already matched.", show_alert=True); return
+        await q.answer("⚠️  Already matched.", show_alert=True)
+        return
 
     match_id = db.execute(
         "INSERT INTO matches (request_id,tutor_id,parent_id,confirmed_by) VALUES (%s,%s,%s,%s) RETURNING id",
@@ -1181,10 +1195,10 @@ async def confirm_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     db.execute("UPDATE tutors SET available=0 WHERE user_id=%s", (tutor_id,))
 
-    sheets.log_match(match_id, req_id, tutor["name"], tutor["phone"],
+    asyncio.create_task(log_to_sheets_async(sheets.log_match, match_id, req_id, tutor["name"], tutor["phone"],
                      req["name"], req["phone"], req["subject"],
-                     tutor["rate"], actor)
-    sheets.log_revenue(match_id, tutor["name"], PLACEMENT_FEE)
+                     tutor["rate"], actor))
+    asyncio.create_task(log_to_sheets_async(sheets.log_revenue, match_id, tutor["name"], PLACEMENT_FEE))
 
     await q.edit_message_text(
         q.message.text + "\n\n" + DIV2 +
@@ -1193,46 +1207,50 @@ async def confirm_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # Notify tutor
-    try:
-        await ctx.bot.send_message(
-            tutor_id,
-            hdr("🎉", "Match Confirmed!") + "\n\n"
-            "Congratulations! You have been matched with a parent.\n\n" +
-            DIV2 + "\n" +
-            fld("Parent name",    req["name"])            + "\n" +
-            fld("WhatsApp",       req["phone"])            + "\n" +
-            fld("Subject needed", req["subject"])          + "\n" +
-            fld("Level",          req["level"])            + "\n" +
-            fld("Area",           req["areas"])            + "\n" +
-            fld("Budget",         rate_str(req["budget"])) + "\n\n" +
-            DIV2 + "\n"
-            "💰  A placement fee of *$" + str(PLACEMENT_FEE) + "* is due to CognifySG.\n"
-            "_Please contact your admin to arrange payment._\n\n"
-            "_Contact the parent on WhatsApp to arrange your first lesson. Good luck!_",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.warning("Could not notify tutor %s: %s", tutor_id, e)
+    # Notify tutor in background
+    async def notify_tutor():
+        try:
+            await ctx.bot.send_message(
+                tutor_id,
+                hdr("🎉", "Match Confirmed!") + "\n\n"
+                "Congratulations! You have been matched with a parent.\n\n" +
+                DIV2 + "\n" +
+                fld("Parent name",    req["name"])            + "\n" +
+                fld("WhatsApp",       req["phone"])            + "\n" +
+                fld("Subject needed", req["subject"])          + "\n" +
+                fld("Level",          req["level"])            + "\n" +
+                fld("Area",           req["areas"])            + "\n" +
+                fld("Budget",         rate_str(req["budget"])) + "\n\n" +
+                DIV2 + "\n"
+                "💰  A placement fee of *$" + str(PLACEMENT_FEE) + "* is due to CognifySG.\n"
+                "_Please contact your admin to arrange payment._\n\n"
+                "_Contact the parent on WhatsApp to arrange your first lesson. Good luck!_",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Could not notify tutor %s: %s", tutor_id, e)
+    
+    async def notify_parent():
+        try:
+            await ctx.bot.send_message(
+                req["parent_id"],
+                hdr("🎉", "Tutor Found!") + "\n\n"
+                "We have matched you with a tutor!\n\n" +
+                DIV2 + "\n" +
+                fld("Tutor name", tutor["name"])          + "\n" +
+                fld("WhatsApp",   tutor["phone"])          + "\n" +
+                fld("Subjects",   tutor["subjects"])       + "\n" +
+                fld("Rate",       rate_str(tutor["rate"])) + "\n\n" +
+                DIV2 + "\n_Contact your tutor on WhatsApp to arrange the first lesson._",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Could not notify parent %s: %s", req["parent_id"], e)
+    
+    asyncio.create_task(notify_tutor())
+    asyncio.create_task(notify_parent())
 
-    # Notify parent
-    try:
-        await ctx.bot.send_message(
-            req["parent_id"],
-            hdr("🎉", "Tutor Found!") + "\n\n"
-            "We have matched you with a tutor!\n\n" +
-            DIV2 + "\n" +
-            fld("Tutor name", tutor["name"])          + "\n" +
-            fld("WhatsApp",   tutor["phone"])          + "\n" +
-            fld("Subjects",   tutor["subjects"])       + "\n" +
-            fld("Rate",       rate_str(tutor["rate"])) + "\n\n" +
-            DIV2 + "\n_Contact your tutor on WhatsApp to arrange the first lesson._",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.warning("Could not notify parent %s: %s", req["parent_id"], e)
-
-# ── ADMIN: /open COMMAND ───────────────────────────────────────────────────────
+# ── ADMIN COMMANDS (simplified) ───────────────────────────────────────────────
 async def open_requests(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔️  Admin access required.")
@@ -1271,7 +1289,6 @@ async def open_requests(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append("\n" + DIV2 + "\n🔴 No applicants  🟡 1-2 applicants  🟢 3+ applicants")
     await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
 
-# ── ADMIN: /applicants COMMAND ─────────────────────────────────────────────────
 async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔️  Admin access required.")
@@ -1285,11 +1302,13 @@ async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         req_id = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("⚠️  Provide a valid request ID."); return
+        await update.message.reply_text("⚠️  Provide a valid request ID.")
+        return
 
-    req  = db.execute("SELECT * FROM requests WHERE id=%s", (req_id,), fetch="one")
+    req = db.execute("SELECT * FROM requests WHERE id=%s", (req_id,), fetch="one")
     if not req:
-        await update.message.reply_text("⚠️  Request #" + str(req_id) + " not found."); return
+        await update.message.reply_text("⚠️  Request #" + str(req_id) + " not found.")
+        return
 
     apps = db.execute("""
         SELECT t.user_id, t.name, t.phone, t.username, t.subjects, t.levels,
@@ -1321,9 +1340,9 @@ async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     medals = ["🥇", "🥈", "🥉"]
     kb_rows = []
     for i, a in enumerate(apps, 1):
-        medal   = medals[i - 1] if i <= 3 else str(i) + "."
-        handle  = "@" + a["username"] if a["username"] else "No username"
-        rating  = ("⭐ " + str(a["rating_avg"]) + " (" + str(a["rating_count"]) + ")") if a["rating_count"] else "No ratings"
+        medal = medals[i - 1] if i <= 3 else str(i) + "."
+        handle = "@" + a["username"] if a["username"] else "No username"
+        rating = ("⭐ " + str(a["rating_avg"]) + " (" + str(a["rating_count"]) + ")") if a["rating_count"] else "No ratings"
         msg += (
             medal + "  *" + a["name"] + "*  —  Score: *" + str(a["match_score"]) + "/100*\n" +
             fld("WhatsApp", a["phone"])         + "\n" +
@@ -1346,18 +1365,19 @@ async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb_rows)
         )
 
-# ── ADMIN APPROVAL (with button locking) ──────────────────────────────────────
+# ── ADMIN APPROVAL ────────────────────────────────────────────────────────────
 async def app_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not is_admin(update.effective_user.id): return
     uid = int(q.data.replace("app_t_", ""))
     row = db.execute("SELECT actioned_by FROM tutors WHERE user_id=%s", (uid,), fetch="one")
     if row and row["actioned_by"]:
-        await q.answer("⚠️  Already actioned.", show_alert=True); return
+        await q.answer("⚠️  Already actioned.", show_alert=True)
+        return
     actor = update.effective_user.username or str(update.effective_user.id)
     db.execute("UPDATE tutors SET approved=1, actioned_by=%s WHERE user_id=%s",
                (update.effective_user.id, uid))
-    sheets.approve_tutor_sheet(uid)
+    asyncio.create_task(log_to_sheets_async(sheets.approve_tutor_sheet, uid))
     await q.edit_message_text(
         q.message.text + "\n\n" + DIV2 + "\n✅  *Approved* by @" + actor, parse_mode="Markdown")
     try:
@@ -1366,7 +1386,8 @@ async def app_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Your profile has been *approved* by CognifySG!\n\n"
             "Use /start to browse and apply for requests.",
             parse_mode="Markdown")
-    except Exception: pass
+    except Exception:
+        pass
 
 async def rej_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -1374,7 +1395,8 @@ async def rej_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = int(q.data.replace("rej_t_", ""))
     row = db.execute("SELECT actioned_by FROM tutors WHERE user_id=%s", (uid,), fetch="one")
     if row and row["actioned_by"]:
-        await q.answer("⚠️  Already actioned.", show_alert=True); return
+        await q.answer("⚠️  Already actioned.", show_alert=True)
+        return
     kb = [[InlineKeyboardButton(r, callback_data="tr_" + str(uid) + "|" + r)] for r in REJECT_TUTOR]
     kb.append([InlineKeyboardButton("🔙  Cancel", callback_data="trc_" + str(uid))])
     await q.edit_message_text(
@@ -1384,12 +1406,13 @@ async def rej_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def rej_tutor_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not is_admin(update.effective_user.id): return
-    parts  = q.data.replace("tr_", "").split("|", 1)
-    uid    = int(parts[0]); reason = parts[1]
-    actor  = update.effective_user.username or str(update.effective_user.id)
-    row    = db.execute("SELECT actioned_by FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    parts = q.data.replace("tr_", "").split("|", 1)
+    uid = int(parts[0]); reason = parts[1]
+    actor = update.effective_user.username or str(update.effective_user.id)
+    row = db.execute("SELECT actioned_by FROM tutors WHERE user_id=%s", (uid,), fetch="one")
     if row and row["actioned_by"]:
-        await q.answer("⚠️  Already actioned.", show_alert=True); return
+        await q.answer("⚠️  Already actioned.", show_alert=True)
+        return
     db.execute("DELETE FROM tutors WHERE user_id=%s", (uid,))
     await q.edit_message_text(
         q.message.text.split("\n\n" + DIV2)[0] + "\n\n" + DIV2 +
@@ -1400,12 +1423,13 @@ async def rej_tutor_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             hdr("❌", "Application Unsuccessful") + "\n\n" +
             fld("Reason", reason) + "\n\n_You may re-apply using /start._",
             parse_mode="Markdown")
-    except Exception: pass
+    except Exception:
+        pass
 
 async def rej_tutor_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = int(q.data.replace("trc_", ""))
-    kb  = [[InlineKeyboardButton("✅  Approve", callback_data="app_t_" + str(uid)),
+    kb = [[InlineKeyboardButton("✅  Approve", callback_data="app_t_" + str(uid)),
             InlineKeyboardButton("❌  Reject",  callback_data="rej_t_" + str(uid))]]
     await q.edit_message_text(
         q.message.text.split("\n\n" + DIV2)[0],
@@ -1416,10 +1440,11 @@ async def view_t_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     t = db.execute("SELECT * FROM tutors WHERE user_id=%s", (q.from_user.id,), fetch="one")
     if not t:
-        await q.edit_message_text("Profile not found. Use /start."); return
-    status   = "🟢  Available" if t["available"] else "🔴  Unavailable"
-    approved = "✅  Approved"  if t["approved"]  else "⏳  Pending"
-    rating   = (str(t["rating_avg"]) + " (" + str(t["rating_count"]) + " reviews)") if t["rating_count"] else "No ratings yet"
+        await q.edit_message_text("Profile not found. Use /start.")
+        return
+    status = "🟢  Available" if t["available"] else "🔴  Unavailable"
+    approved = "✅  Approved" if t["approved"] else "⏳  Pending"
+    rating = (str(t["rating_avg"]) + " (" + str(t["rating_count"]) + " reviews)") if t["rating_count"] else "No ratings yet"
     await q.edit_message_text(
         hdr("👤", "My Tutor Profile") + "\n\n" +
         fld("Name",     t["name"])          + "\n" +
@@ -1453,18 +1478,21 @@ async def my_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         (q.from_user.id,), fetch="all"
     )
     if not reqs:
+        kb = [[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]
         await q.edit_message_text(
             hdr("📋", "My Requests") + "\n\nNo requests yet.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]),
+            reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="Markdown"
-        ); return
-    lines = []
+        )
+        return
+    lines = [hdr("📋", "My Requests") + "\n"]
     for r in reqs:
         icon = "✅" if r["status"] == "matched" else "🟡"
         lines.append(icon + "  *#" + str(r["id"]) + "* — " + r["subject"] + " | " + rate_str(r["budget"]))
+    kb = [[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]
     await q.edit_message_text(
-        hdr("📋", "My Requests") + "\n\n" + "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙  Back", callback_data="back_p")]]),
+        "\n\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
 
@@ -1508,13 +1536,16 @@ async def cancel_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── ADMIN MANAGEMENT ───────────────────────────────────────────────────────────
 async def add_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != SUPER_ADMIN_ID:
-        await update.message.reply_text("⛔️  Super Admin only."); return
+        await update.message.reply_text("⛔️  Super Admin only.")
+        return
     if not ctx.args:
-        await update.message.reply_text("Usage: `/addadmin TELEGRAM_ID`", parse_mode="Markdown"); return
+        await update.message.reply_text("Usage: `/addadmin TELEGRAM_ID`", parse_mode="Markdown")
+        return
     try:
         new_id = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("⚠️  Provide a numeric Telegram ID."); return
+        await update.message.reply_text("⚠️  Provide a numeric Telegram ID.")
+        return
     db.execute("INSERT INTO admins(user_id,name,added_by) VALUES(%s,'Admin',%s) ON CONFLICT DO NOTHING",
                (new_id, update.effective_user.id))
     await update.message.reply_text(
@@ -1529,19 +1560,24 @@ async def add_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "`/admin` — Dashboard stats\n"
             "`/listadmins` — View admin team",
             parse_mode="Markdown")
-    except Exception: pass
+    except Exception:
+        pass
 
 async def remove_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != SUPER_ADMIN_ID:
-        await update.message.reply_text("⛔️  Super Admin only."); return
+        await update.message.reply_text("⛔️  Super Admin only.")
+        return
     if not ctx.args:
-        await update.message.reply_text("Usage: `/removeadmin TELEGRAM_ID`", parse_mode="Markdown"); return
+        await update.message.reply_text("Usage: `/removeadmin TELEGRAM_ID`", parse_mode="Markdown")
+        return
     try:
         rid = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("⚠️  Provide a numeric ID."); return
+        await update.message.reply_text("⚠️  Provide a numeric ID.")
+        return
     if rid == SUPER_ADMIN_ID:
-        await update.message.reply_text("⛔️  Cannot remove Super Admin."); return
+        await update.message.reply_text("⛔️  Cannot remove Super Admin.")
+        return
     db.execute("DELETE FROM admins WHERE user_id=%s", (rid,))
     await update.message.reply_text(
         hdr("✅", "Admin Removed") + "\n\nUser `" + str(rid) + "` removed.",
@@ -1549,11 +1585,12 @@ async def remove_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def list_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔️  Admin access required."); return
+        await update.message.reply_text("⛔️  Admin access required.")
+        return
     admins = db.execute("SELECT user_id, username, added_at FROM admins ORDER BY added_at", fetch="all")
-    lines  = []
+    lines = []
     for a in admins:
-        crown  = "👑 " if a["user_id"] == SUPER_ADMIN_ID else "🔑 "
+        crown = "👑 " if a["user_id"] == SUPER_ADMIN_ID else "🔑 "
         handle = "@" + a["username"] if a["username"] else "`" + str(a["user_id"]) + "`"
         lines.append(crown + handle)
     await update.message.reply_text(
@@ -1563,13 +1600,14 @@ async def list_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔️  Admin access required."); return
-    t_active  = db.execute("SELECT COUNT(*) as n FROM tutors   WHERE approved=1", fetch="one")["n"]
-    t_pending = db.execute("SELECT COUNT(*) as n FROM tutors   WHERE approved=0", fetch="one")["n"]
-    r_open    = db.execute("SELECT COUNT(*) as n FROM requests WHERE status='open' AND approved=1", fetch="one")["n"]
+        await update.message.reply_text("⛔️  Admin access required.")
+        return
+    t_active = db.execute("SELECT COUNT(*) as n FROM tutors WHERE approved=1", fetch="one")["n"]
+    t_pending = db.execute("SELECT COUNT(*) as n FROM tutors WHERE approved=0", fetch="one")["n"]
+    r_open = db.execute("SELECT COUNT(*) as n FROM requests WHERE status='open' AND approved=1", fetch="one")["n"]
     r_pending = db.execute("SELECT COUNT(*) as n FROM requests WHERE approved=0", fetch="one")["n"]
-    matched   = db.execute("SELECT COUNT(*) as n FROM matches",  fetch="one")["n"]
-    apps      = db.execute("SELECT COUNT(*) as n FROM applications", fetch="one")["n"]
+    matched = db.execute("SELECT COUNT(*) as n FROM matches", fetch="one")["n"]
+    apps = db.execute("SELECT COUNT(*) as n FROM applications", fetch="one")["n"]
     await update.message.reply_text(
         hdr("⚙️", "Admin Panel — CognifySG") + "\n\n"
         "👨‍🏫  *Tutors*\n" +
@@ -1609,6 +1647,23 @@ async def back_t(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def back_p(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await parent_menu(update, ctx)
+
+async def back_to_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Return to role selection (fresh start)"""
+    q = update.callback_query
+    await q.answer()
+    kb = [[
+        InlineKeyboardButton("👨‍🏫  I am a Tutor",  callback_data="role_tutor"),
+        InlineKeyboardButton("👨‍👩‍👧  I am a Parent", callback_data="role_parent"),
+    ]]
+    await q.edit_message_text(
+        hdr("🎓", "CognifySG") + "\n\n"
+        "Singapore's premier tuition matching platform.\n\n" +
+        DIV2 + "\nPlease identify yourself to continue:\n" + DIV2,
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return ROLE_SELECT
 
 # ── NEW COMMAND HANDLERS ───────────────────────────────────────────────────────
 async def profile_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1777,6 +1832,7 @@ def main():
     app.add_handler(CallbackQueryHandler(my_reqs,           pattern="^my_reqs$"))
     app.add_handler(CallbackQueryHandler(back_t,            pattern="^back_t$"))
     app.add_handler(CallbackQueryHandler(back_p,            pattern="^back_p$"))
+    app.add_handler(CallbackQueryHandler(back_to_start,     pattern="^back_to_start$"))
     app.add_handler(CallbackQueryHandler(app_tutor,         pattern="^app_t_\\d+$"))
     app.add_handler(CallbackQueryHandler(rej_tutor,         pattern="^rej_t_\\d+$"))
     app.add_handler(CallbackQueryHandler(rej_tutor_reason,  pattern="^tr_"))

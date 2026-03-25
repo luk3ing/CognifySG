@@ -1,6 +1,7 @@
 """
 CognifySG — Production Bot v6
-Improved UI: start button, new commands, shorter dividers, cancel option.
+Enhanced UI: edit profile for tutors, applied postings, multiple parent requests,
+back buttons, and improved feedback.
 """
 
 import os
@@ -64,7 +65,7 @@ def ms_kb(options, selected, prefix):
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("Confirm Selection ✅", callback_data=prefix + "|DONE")])
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])  # Added cancel
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
 # ── KEEPALIVE ──────────────────────────────────────────────────────────────────
@@ -175,7 +176,9 @@ def compute_score(tutor, req):
  CAPTCHA,
  ROLE_SELECT,
  T_NAME, T_PHONE, T_SUBJECTS, T_LEVELS, T_AREAS, T_RATE,
- P_NAME, P_PHONE, P_SUBJECT,  P_LEVEL,  P_AREA,  P_BUDGET) = range(15)
+ P_NAME, P_PHONE, P_SUBJECT,  P_LEVEL,  P_AREA,  P_BUDGET,
+ # NEW: states for editing tutor profile
+ EDIT_TUTOR_MENU, EDIT_NAME, EDIT_PHONE, EDIT_SUBJECTS, EDIT_LEVELS, EDIT_AREAS, EDIT_RATE) = range(15, 22)
 
 # ── CAPTCHA ────────────────────────────────────────────────────────────────────
 def gen_captcha():
@@ -185,7 +188,7 @@ def gen_captcha():
     opts  = wrong + [ans]; random.shuffle(opts)
     return a, b, ans, opts
 
-# ── START ENTRY (refactored to work with both /start and button) ──────────────
+# ── START ENTRY ────────────────────────────────────────────────────────────────
 async def send_terms(user_id, bot):
     """Send the terms message to a user (used by both /start and button)."""
     kb = [[
@@ -264,7 +267,7 @@ async def start_welcome_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     )
     return CAPTCHA
 
-# ── WELCOME HANDLER (for new users) ───────────────────────────────────────────
+# ── WELCOME HANDLER ───────────────────────────────────────────────────────────
 async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message with Start button for users who haven't started."""
     uid = update.effective_user.id
@@ -386,7 +389,7 @@ async def role_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return T_NAME
     return await parent_menu(update, ctx)
 
-# ── TUTOR REGISTRATION ─────────────────────────────────────────────────────────
+# ── TUTOR REGISTRATION (unchanged) ────────────────────────────────────────────
 async def t_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not valid_name(txt):
@@ -553,14 +556,16 @@ async def t_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# ── TUTOR MENU ─────────────────────────────────────────────────────────────────
+# ── TUTOR MENU (with new buttons) ─────────────────────────────────────────────
 async def tutor_menu_msg(update, ctx):
     row = db.execute("SELECT available FROM tutors WHERE user_id=%s",
                      (update.effective_user.id,), fetch="one")
     status = "🟢  Available" if (row and row["available"]) else "🔴  Unavailable"
     kb = [
         [InlineKeyboardButton("📋  Browse Requests",      callback_data="browse_reqs")],
+        [InlineKeyboardButton("📌  Applied Postings",     callback_data="applied_postings")],   # NEW
         [InlineKeyboardButton("👤  My Profile",           callback_data="view_t_profile")],
+        [InlineKeyboardButton("✏️  Edit Profile",          callback_data="edit_profile")],       # NEW
         [InlineKeyboardButton("🔄  Toggle Availability",  callback_data="toggle_avail")],
     ]
     text = hdr("🎓", "Tutor Dashboard") + "\n\n" + fld("Status", status) + "\n\n" + DIV2 + "\n_Select an option:_"
@@ -574,14 +579,268 @@ async def tutor_menu(update, ctx):
     status = "🟢  Available" if (row and row["available"]) else "🔴  Unavailable"
     kb = [
         [InlineKeyboardButton("📋  Browse Requests",      callback_data="browse_reqs")],
+        [InlineKeyboardButton("📌  Applied Postings",     callback_data="applied_postings")],
         [InlineKeyboardButton("👤  My Profile",           callback_data="view_t_profile")],
+        [InlineKeyboardButton("✏️  Edit Profile",          callback_data="edit_profile")],
         [InlineKeyboardButton("🔄  Toggle Availability",  callback_data="toggle_avail")],
     ]
     text = hdr("🎓", "Tutor Dashboard") + "\n\n" + fld("Status", status) + "\n\n" + DIV2 + "\n_Select an option:_"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return ConversationHandler.END
 
-# ── PARENT FLOW ────────────────────────────────────────────────────────────────
+# ── APPLIED POSTINGS (for tutors) ─────────────────────────────────────────────
+async def applied_postings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    # Get all applications with request details
+    apps = db.execute("""
+        SELECT a.request_id, r.subject, r.level, a.match_score, r.status, a.created_at
+        FROM applications a
+        JOIN requests r ON r.id = a.request_id
+        WHERE a.tutor_id=%s
+        ORDER BY a.created_at DESC
+    """, (uid,), fetch="all")
+
+    if not apps:
+        kb = [[InlineKeyboardButton("🔙  Back", callback_data="back_t")]]
+        await q.edit_message_text(
+            hdr("📌", "Your Applied Postings") + "\n\nYou have not applied to any requests yet.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+        return
+
+    lines = [hdr("📌", "Your Applied Postings") + "\n"]
+    for a in apps:
+        status_icon = "✅ Matched" if a["status"] == "matched" else "🟡 Pending"
+        lines.append(
+            f"📌 *#{a['request_id']}* — {a['subject']} | {a['level']}\n"
+            f"   Score: {a['match_score']}/100  |  Status: {status_icon}\n"
+            f"   Applied: {a['created_at'].strftime('%d %b %Y')}"
+        )
+        lines.append(DIV2)
+
+    lines.append("_Tap /start to return to dashboard_")
+    await q.edit_message_text("\n\n".join(lines), parse_mode="Markdown")
+
+# ── EDIT TUTOR PROFILE (NEW) ──────────────────────────────────────────────────
+async def edit_profile_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
+    if not tutor:
+        await q.edit_message_text("Profile not found. Use /start.")
+        return
+    ctx.user_data["edit_tutor"] = tutor  # store original for later updates
+    kb = [
+        [InlineKeyboardButton("✏️  Name", callback_data="edit_name")],
+        [InlineKeyboardButton("📱  Phone", callback_data="edit_phone")],
+        [InlineKeyboardButton("📚  Subjects", callback_data="edit_subjects")],
+        [InlineKeyboardButton("🎓  Levels", callback_data="edit_levels")],
+        [InlineKeyboardButton("📍  Areas", callback_data="edit_areas")],
+        [InlineKeyboardButton("💰  Rate", callback_data="edit_rate")],
+        [InlineKeyboardButton("🔙  Back", callback_data="back_t")],
+    ]
+    await q.edit_message_text(
+        hdr("✏️", "Edit Profile") + "\n\nSelect what you want to update:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return EDIT_TUTOR_MENU
+
+async def edit_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        hdr("✏️", "Edit Name") + "\n\nEnter your *new full name:*",
+        parse_mode="Markdown"
+    )
+    return EDIT_NAME
+
+async def edit_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        hdr("✏️", "Edit WhatsApp Number") + "\n\nEnter your *8-digit SG WhatsApp number:*\n\n"
+        "✳️  Starts with 8 or 9\n✳️  No country code\n✳️  Example: `91234567`",
+        parse_mode="Markdown"
+    )
+    return EDIT_PHONE
+
+async def edit_subjects(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tutor = ctx.user_data.get("edit_tutor")
+    if not tutor:
+        return await edit_profile_menu(update, ctx)
+    current = tutor["subjects"].split(",") if tutor["subjects"] else []
+    ctx.user_data["edit_subjects"] = current
+    await q.edit_message_text(
+        hdr("✏️", "Edit Subjects") + "\n\nSelect *all subjects* you teach:",
+        reply_markup=ms_kb(ALL_SUBJECTS, current, "esubj"),
+        parse_mode="Markdown"
+    )
+    return EDIT_SUBJECTS
+
+async def edit_subjects_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    val = q.data.split("|", 1)[1]
+    sel = ctx.user_data.get("edit_subjects", [])
+    if val == "DONE":
+        if not sel:
+            await q.answer("Pick at least one subject!", show_alert=True)
+            return EDIT_SUBJECTS
+        # Update database
+        uid = q.from_user.id
+        db.execute("UPDATE tutors SET subjects=%s WHERE user_id=%s",
+                   (", ".join(sel), uid))
+        await q.edit_message_text(
+            hdr("✅", "Subjects Updated") + "\n\nSubjects have been updated.",
+            parse_mode="Markdown"
+        )
+        return await edit_profile_menu(update, ctx)
+    else:
+        sel.remove(val) if val in sel else sel.append(val)
+        ctx.user_data["edit_subjects"] = sel
+        await q.edit_message_reply_markup(reply_markup=ms_kb(ALL_SUBJECTS, sel, "esubj"))
+        return EDIT_SUBJECTS
+
+async def edit_levels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tutor = ctx.user_data.get("edit_tutor")
+    if not tutor:
+        return await edit_profile_menu(update, ctx)
+    current = tutor["levels"].split(",") if tutor["levels"] else []
+    ctx.user_data["edit_levels"] = current
+    await q.edit_message_text(
+        hdr("✏️", "Edit Levels") + "\n\nSelect *levels* you teach:",
+        reply_markup=ms_kb(ALL_LEVELS, current, "elvl"),
+        parse_mode="Markdown"
+    )
+    return EDIT_LEVELS
+
+async def edit_levels_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    val = q.data.split("|", 1)[1]
+    sel = ctx.user_data.get("edit_levels", [])
+    if val == "DONE":
+        if not sel:
+            await q.answer("Pick at least one level!", show_alert=True)
+            return EDIT_LEVELS
+        uid = q.from_user.id
+        db.execute("UPDATE tutors SET levels=%s WHERE user_id=%s",
+                   (", ".join(sel), uid))
+        await q.edit_message_text(
+            hdr("✅", "Levels Updated") + "\n\nLevels have been updated.",
+            parse_mode="Markdown"
+        )
+        return await edit_profile_menu(update, ctx)
+    else:
+        sel.remove(val) if val in sel else sel.append(val)
+        ctx.user_data["edit_levels"] = sel
+        await q.edit_message_reply_markup(reply_markup=ms_kb(ALL_LEVELS, sel, "elvl"))
+        return EDIT_LEVELS
+
+async def edit_areas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tutor = ctx.user_data.get("edit_tutor")
+    if not tutor:
+        return await edit_profile_menu(update, ctx)
+    current = tutor["areas"].split(",") if tutor["areas"] else []
+    ctx.user_data["edit_areas"] = current
+    await q.edit_message_text(
+        hdr("✏️", "Edit Areas") + "\n\nSelect *areas* you travel to:",
+        reply_markup=ms_kb(ALL_AREAS, current, "eara"),
+        parse_mode="Markdown"
+    )
+    return EDIT_AREAS
+
+async def edit_areas_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    val = q.data.split("|", 1)[1]
+    sel = ctx.user_data.get("edit_areas", [])
+    if val == "DONE":
+        if not sel:
+            await q.answer("Pick at least one area!", show_alert=True)
+            return EDIT_AREAS
+        uid = q.from_user.id
+        db.execute("UPDATE tutors SET areas=%s WHERE user_id=%s",
+                   (", ".join(sel), uid))
+        await q.edit_message_text(
+            hdr("✅", "Areas Updated") + "\n\nAreas have been updated.",
+            parse_mode="Markdown"
+        )
+        return await edit_profile_menu(update, ctx)
+    else:
+        sel.remove(val) if val in sel else sel.append(val)
+        ctx.user_data["edit_areas"] = sel
+        await q.edit_message_reply_markup(reply_markup=ms_kb(ALL_AREAS, sel, "eara"))
+        return EDIT_AREAS
+
+async def edit_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        hdr("✏️", "Edit Hourly Rate") + "\n\nEnter your new *hourly rate in SGD.*\n\n"
+        "✳️  Numbers only (e.g. `35`)\n✳️  Between $15–$500/hr",
+        parse_mode="Markdown"
+    )
+    return EDIT_RATE
+
+async def update_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    if not valid_name(txt):
+        await update.message.reply_text("⚠️  *Invalid name.* Letters only, min 2 characters.", parse_mode="Markdown")
+        return EDIT_NAME
+    uid = update.effective_user.id
+    db.execute("UPDATE tutors SET name=%s WHERE user_id=%s", (txt, uid))
+    await update.message.reply_text(
+        hdr("✅", "Name Updated") + "\n\nYour name has been updated.",
+        parse_mode="Markdown"
+    )
+    return await edit_profile_menu(update, ctx)
+
+async def update_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    if not valid_phone(txt):
+        await update.message.reply_text(
+            "⚠️  *Invalid number.* 8 digits starting with 8 or 9.", parse_mode="Markdown")
+        return EDIT_PHONE
+    uid = update.effective_user.id
+    # Check if phone is already used by another tutor
+    existing = db.execute("SELECT user_id FROM tutors WHERE phone=%s AND user_id!=%s", (txt, uid), fetch="one")
+    if existing:
+        await update.message.reply_text(
+            "⚠️  This phone number is already registered to another account.", parse_mode="Markdown")
+        return EDIT_PHONE
+    db.execute("UPDATE tutors SET phone=%s WHERE user_id=%s", (txt, uid))
+    await update.message.reply_text(
+        hdr("✅", "Phone Updated") + "\n\nYour WhatsApp number has been updated.",
+        parse_mode="Markdown"
+    )
+    return await edit_profile_menu(update, ctx)
+
+async def update_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    if not valid_rate(txt):
+        await update.message.reply_text(
+            "⚠️  *Invalid rate.* Enter a number between 15 and 500.", parse_mode="Markdown")
+        return EDIT_RATE
+    rate = clean_rate(txt)
+    uid = update.effective_user.id
+    db.execute("UPDATE tutors SET rate=%s WHERE user_id=%s", (rate, uid))
+    await update.message.reply_text(
+        hdr("✅", "Rate Updated") + "\n\nYour hourly rate has been updated.",
+        parse_mode="Markdown"
+    )
+    return await edit_profile_menu(update, ctx)
+
+# ── PARENT FLOW (unchanged) ───────────────────────────────────────────────────
 async def parent_menu(update, ctx):
     kb = [
         [InlineKeyboardButton("📝  Post a Request", callback_data="post_req")],
@@ -743,7 +1002,7 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ── BROWSE REQUESTS (Tutor) ────────────────────────────────────────────────────
+# ── BROWSE REQUESTS (modified to exclude already applied) ────────────────────
 async def browse_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = q.from_user.id
@@ -756,14 +1015,20 @@ async def browse_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    reqs = db.execute(
-        "SELECT id,subject,level,areas,budget FROM requests "
-        "WHERE status='open' AND approved=1 ORDER BY created_at DESC",
-        fetch="all"
-    )
+    # Get open requests that the tutor has NOT applied to
+    reqs = db.execute("""
+        SELECT id, subject, level, areas, budget
+        FROM requests
+        WHERE status='open' AND approved=1
+          AND id NOT IN (
+              SELECT request_id FROM applications WHERE tutor_id=%s
+          )
+        ORDER BY created_at DESC
+    """, (uid,), fetch="all")
+
     if not reqs:
         await q.edit_message_text(
-            hdr("📋", "Open Requests") + "\n\nNo open requests at this time.",
+            hdr("📋", "Open Requests") + "\n\nNo new requests at this time.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙  Back", callback_data="back_t")]]),
             parse_mode="Markdown"
         )
@@ -861,11 +1126,11 @@ async def apply_req(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         hdr("✅", "Application Submitted") + "\n\n"
         "Your application has been received.\n\n"
         "Admins will review and contact you if matched.\n\n"
-        f"Use /myapplications to track this request.",
+        f"Use /myapplications or the 'Applied Postings' button to track this request.",
         parse_mode="Markdown"
     )
 
-# ── CONFIRM MATCH ──────────────────────────────────────────────────────────────
+# ── CONFIRM MATCH (unchanged) ─────────────────────────────────────────────────
 async def confirm_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not is_admin(update.effective_user.id):
@@ -946,7 +1211,7 @@ async def confirm_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("Could not notify parent %s: %s", req["parent_id"], e)
 
-# ── ADMIN: /open COMMAND ───────────────────────────────────────────────────────
+# ── ADMIN: /open, /applicants, etc. (unchanged) ──────────────────────────────
 async def open_requests(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔️  Admin access required.")
@@ -985,7 +1250,6 @@ async def open_requests(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append("\n" + DIV2 + "\n🔴 No applicants  🟡 1-2 applicants  🟢 3+ applicants")
     await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
 
-# ── ADMIN: /applicants COMMAND ─────────────────────────────────────────────────
 async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔️  Admin access required.")
@@ -1060,7 +1324,7 @@ async def view_applicants(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb_rows)
         )
 
-# ── ADMIN APPROVAL (with button locking) ──────────────────────────────────────
+# ── ADMIN APPROVAL (unchanged) ───────────────────────────────────────────────
 async def app_tutor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not is_admin(update.effective_user.id): return
@@ -1125,7 +1389,7 @@ async def rej_tutor_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         q.message.text.split("\n\n" + DIV2)[0],
         reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-# ── TUTOR PROFILE / AVAILABILITY ───────────────────────────────────────────────
+# ── TUTOR PROFILE / AVAILABILITY (unchanged) ──────────────────────────────────
 async def view_t_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     t = db.execute("SELECT * FROM tutors WHERE user_id=%s", (q.from_user.id,), fetch="one")
@@ -1182,7 +1446,7 @@ async def my_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ── PDPA — DELETE ACCOUNT ──────────────────────────────────────────────────────
+# ── PDPA — DELETE ACCOUNT (unchanged) ─────────────────────────────────────────
 async def delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     kb = [[
@@ -1219,7 +1483,7 @@ async def cancel_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     await q.edit_message_text("Deletion cancelled. Your account is safe.")
 
-# ── ADMIN MANAGEMENT ───────────────────────────────────────────────────────────
+# ── ADMIN MANAGEMENT (unchanged) ──────────────────────────────────────────────
 async def add_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != SUPER_ADMIN_ID:
         await update.message.reply_text("⛔️  Super Admin only."); return
@@ -1324,7 +1588,7 @@ async def back_t(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def back_p(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await parent_menu(update, ctx)
 
-# ── NEW COMMAND HANDLERS ───────────────────────────────────────────────────────
+# ── NEW COMMAND HANDLERS (already defined, but ensure they are added) ─────────
 async def profile_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
@@ -1343,7 +1607,6 @@ async def profile_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-    # Check if user is a parent
     parent = db.execute("SELECT * FROM requests WHERE parent_id=%s LIMIT 1", (uid,), fetch="one")
     if parent:
         await update.message.reply_text(
@@ -1360,9 +1623,8 @@ async def myrequests_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     tutor = db.execute("SELECT * FROM tutors WHERE user_id=%s", (uid,), fetch="one")
     if tutor:
-        # Show applications
         apps = db.execute("""
-            SELECT a.request_id, r.subject, r.level, a.match_score, a.created_at
+            SELECT a.request_id, r.subject, r.level, a.match_score, r.status, a.created_at
             FROM applications a
             JOIN requests r ON r.id = a.request_id
             WHERE a.tutor_id=%s
@@ -1373,13 +1635,14 @@ async def myrequests_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         lines = [hdr("📋", "Your Applications") + "\n"]
         for a in apps:
+            status_icon = "✅ Matched" if a["status"] == "matched" else "🟡 Pending"
             lines.append(
                 f"📌 *#{a['request_id']}* — {a['subject']} | {a['level']}\n"
-                f"   Score: {a['match_score']}/100  |  Applied: {a['created_at'].strftime('%d %b')}"
+                f"   Score: {a['match_score']}/100  |  Status: {status_icon}\n"
+                f"   Applied: {a['created_at'].strftime('%d %b %Y')}"
             )
         await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
         return
-    # For parents: show requests
     reqs = db.execute(
         "SELECT id, subject, level, status, created_at FROM requests WHERE parent_id=%s ORDER BY created_at DESC",
         (uid,), fetch="all"
@@ -1397,7 +1660,6 @@ async def myapplications_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await myrequests_cmd(update, ctx)
 
 async def cancel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Cancel current conversation and clear data."""
     ctx.user_data.clear()
     await update.message.reply_text(
         "Operation cancelled. Use /start to begin again.",
@@ -1420,6 +1682,7 @@ def main():
         .build()
     )
 
+    # Conversation handler for registration and edit profile (new states)
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -1441,6 +1704,14 @@ def main():
             P_LEVEL:    [CallbackQueryHandler(p_level,    pattern="^plvl\\|")],
             P_AREA:     [CallbackQueryHandler(p_area,     pattern="^parea\\|")],
             P_BUDGET:   [MessageHandler(filters.TEXT & ~filters.COMMAND, p_budget)],
+            # NEW edit profile states
+            EDIT_TUTOR_MENU: [CallbackQueryHandler(edit_profile_menu, pattern="^edit_profile$")],
+            EDIT_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
+            EDIT_PHONE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, update_phone)],
+            EDIT_SUBJECTS: [CallbackQueryHandler(edit_subjects_cb, pattern="^esubj\\|")],
+            EDIT_LEVELS:   [CallbackQueryHandler(edit_levels_cb, pattern="^elvl\\|")],
+            EDIT_AREAS:    [CallbackQueryHandler(edit_areas_cb, pattern="^eara\\|")],
+            EDIT_RATE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, update_rate)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_cmd),
@@ -1468,8 +1739,16 @@ def main():
     app.add_handler(CommandHandler("deleteaccount", delete_account))
     app.add_handler(CommandHandler("terms",       terms_cmd))
 
-    # Callback handlers
+    # Callback handlers (including new ones)
     app.add_handler(CallbackQueryHandler(browse_reqs,       pattern="^browse_reqs$"))
+    app.add_handler(CallbackQueryHandler(applied_postings,  pattern="^applied_postings$"))  # NEW
+    app.add_handler(CallbackQueryHandler(edit_profile_menu, pattern="^edit_profile$"))
+    app.add_handler(CallbackQueryHandler(edit_name,         pattern="^edit_name$"))
+    app.add_handler(CallbackQueryHandler(edit_phone,        pattern="^edit_phone$"))
+    app.add_handler(CallbackQueryHandler(edit_subjects,     pattern="^edit_subjects$"))
+    app.add_handler(CallbackQueryHandler(edit_levels,       pattern="^edit_levels$"))
+    app.add_handler(CallbackQueryHandler(edit_areas,        pattern="^edit_areas$"))
+    app.add_handler(CallbackQueryHandler(edit_rate,         pattern="^edit_rate$"))
     app.add_handler(CallbackQueryHandler(req_nav,           pattern="^req_(next|prev)$"))
     app.add_handler(CallbackQueryHandler(apply_req,         pattern="^apply_\\d+$"))
     app.add_handler(CallbackQueryHandler(confirm_match,     pattern="^confirm_match_"))
@@ -1485,12 +1764,12 @@ def main():
     app.add_handler(CallbackQueryHandler(confirm_delete,    pattern="^confirm_delete$"))
     app.add_handler(CallbackQueryHandler(cancel_delete,     pattern="^cancel_delete$"))
 
-    # Message handler for welcome (must be last)
+    # Welcome message handler
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, welcome))
 
     app.add_error_handler(error_handler)
 
-    logger.info("CognifySG v6 is running with improved UI!")
+    logger.info("CognifySG v6 is running with enhanced UI (edit profile, applied postings)!")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":

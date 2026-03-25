@@ -181,12 +181,56 @@ def compute_score(tutor, req):
  EDIT_TUTOR_MENU, EDIT_NAME, EDIT_PHONE, EDIT_SUBJECTS, EDIT_LEVELS, EDIT_AREAS, EDIT_RATE) = range(15, 22)
 
 # ── CAPTCHA ────────────────────────────────────────────────────────────────────
-def gen_captcha():
-    a, b  = random.randint(2, 9), random.randint(2, 9)
-    ans   = a + b
-    wrong = random.sample([x for x in range(2, 19) if x != ans], 3)
-    opts  = wrong + [ans]; random.shuffle(opts)
-    return a, b, ans, opts
+async def captcha_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    # Safely extract chosen number
+    try:
+        chosen = int(q.data.split("|")[1])
+    except (IndexError, ValueError):
+        await q.answer("Invalid selection. Please try again.", show_alert=True)
+        return CAPTCHA
+
+    ctx.user_data["cattempts"] = ctx.user_data.get("cattempts", 0) + 1
+    attempts = ctx.user_data["cattempts"]
+
+    if chosen == ctx.user_data.get("captcha_ans"):
+        kb = [[
+            InlineKeyboardButton("👨‍🏫  I am a Tutor",  callback_data="role_tutor"),
+            InlineKeyboardButton("👨‍👩‍👧  I am a Parent", callback_data="role_parent"),
+        ]]
+        await q.edit_message_text(
+            hdr("🎓", "Welcome to CognifySG") + "\n\n"
+            "Singapore's premier tuition matching platform.\n\n" +
+            DIV2 + "\nPlease identify yourself to continue:\n" + DIV2,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+        return ROLE_SELECT
+
+    remaining = MAX_CAPTCHA - attempts
+    if remaining <= 0:
+        db.execute("INSERT INTO blocked(user_id) VALUES(%s) ON CONFLICT DO NOTHING", (uid,))
+        await q.edit_message_text(
+            hdr("🚫", "Access Denied") + "\n\nMaximum attempts exceeded.",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    a2, b2, ans2, opts2 = gen_captcha()
+    ctx.user_data.update({"captcha_ans": ans2, "ca": a2, "cb": b2})
+    kb = [[InlineKeyboardButton(str(o), callback_data="cap|" + str(o)) for o in opts2]]
+    pl = "s" if remaining > 1 else ""
+    await q.edit_message_text(
+        hdr("🔐", "Verification Failed") + "\n\n"
+        "❌  Incorrect.  ⚠️  *" + str(remaining) + " attempt" + pl + " remaining.*\n\n" +
+        DIV2 + "\n❓  *What is  " + str(a2) + " + " + str(b2) + "?*\n" + DIV2,
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    return CAPTCHA
 
 # ── START ENTRY ────────────────────────────────────────────────────────────────
 async def send_terms(user_id, bot):

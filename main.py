@@ -20,12 +20,33 @@ from telegram.ext import (
 import db
 import sheets
 
+import time
+
+# Wait for database to be ready (if on Railway)
+if os.environ.get("RAILWAY_ENVIRONMENT"):
+    time.sleep(5)
 # ── LOGGING ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Make sure the keepalive server starts
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_keepalive():
+    server = HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), KeepAliveHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_keepalive, daemon=True).start()
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 TOKEN          = os.environ.get("TOKEN")

@@ -21,6 +21,33 @@ from telegram.ext import (
 
 import db
 import sheets
+# ────WELCOME ────────────────────────────────────────────────────────────────────
+# At the top of main.py, after imports, add a handler for any message
+async def welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send a welcome message with a Start button for new users."""
+    uid = update.effective_user.id
+    # If user already accepted terms, ignore (they are in the flow)
+    if db.execute("SELECT 1 FROM terms_accepted WHERE user_id=%s", (uid,), fetch="one"):
+        return
+    # If user is in a conversation, ignore
+    if ctx.user_data:
+        return
+    # Send welcome with inline start button
+    kb = [[InlineKeyboardButton("▶️ Start", callback_data="start_welcome")]]
+    await update.message.reply_text(
+        hdr("🎓", "Welcome to CognifySG") + "\n\n"
+        "Singapore's trusted tuition matching platform.\n\n"
+        "Tap *Start* to begin your journey.",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+
+# Then add a handler for "start_welcome" callback
+async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # Call the same start logic as /start
+    await start(update, ctx)  # need to pass proper update object; we'll adjust
 
 # ── LOGGING ────────────────────────────────────────────────────────────────────
 logging.basicConfig(

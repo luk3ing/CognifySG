@@ -969,43 +969,34 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Show loading indicator
     msg = await update.message.reply_text("⏳ Processing your request...")
 
-    # DEBUG: Print what we're trying to insert
-    logger.info(f"=== DEBUG: Attempting to insert request for user {u.id} ===")
-    logger.info(f"Parent ID: {u.id}")
-    logger.info(f"Username: {u.username or ''}")
-    logger.info(f"Name: {ctx.user_data['p_name']}")
-    logger.info(f"Phone: {ctx.user_data['p_phone']}")
-    logger.info(f"Subject: {', '.join(ctx.user_data['p_subject'])}")
-    logger.info(f"Level: {', '.join(ctx.user_data['p_level'])}")
-    logger.info(f"Area: {', '.join(ctx.user_data['p_area'])}")
-    logger.info(f"Budget: {budget}")
-
-    conn = None
+    # Use a direct database connection (bypass db.execute wrapper)
+    import psycopg2
+    import psycopg2.extras
+    
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    
     try:
-        conn = db.db()
-        with conn.cursor() as cur:
-            # First, check if the table exists and what columns are available
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'requests'
-            """)
-            columns = [row[0] for row in cur.fetchall()]
-            logger.info(f"Available columns in requests table: {columns}")
-            
-            # Now try the insert
-            cur.execute("""
-                INSERT INTO requests (parent_id, username, name, phone, subject, level, areas, budget, approved) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1) RETURNING id
-            """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
-                  ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
-                  ", ".join(ctx.user_data["p_area"]), budget))
-            req_id = cur.fetchone()[0]
-            conn.commit()
-            logger.info(f"✅ Success! Created request #{req_id}")
-            
+        # Direct connection
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        # Try the insert
+        cur.execute("""
+            INSERT INTO requests (parent_id, username, name, phone, subject, level, areas, budget, approved) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1) RETURNING id
+        """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
+              ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
+              ", ".join(ctx.user_data["p_area"]), budget))
+        
+        req_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        # Delete loading message
         await msg.delete()
         
+        # Success message
         kb = [[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="back_p")]]
         await update.message.reply_text(
             hdr("✅", "Request Live") + "\n\n"
@@ -1020,6 +1011,7 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
+        # Background tasks
         async def background_tasks():
             try:
                 await log_to_sheets_async(
@@ -1052,16 +1044,10 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"🚨 Database insert failed: {e}")
-        if conn:
-            conn.rollback()
-        await msg.edit_text(f"❌ Failed to save request.\n\nError: {str(e)[:200]}\n\nPlease try again or contact support.")
+        await msg.edit_text(f"❌ Failed to save request.\n\nError: {str(e)}\n\nPlease try again.")
         return P_BUDGET
-    finally:
-        if conn:
-            db.release(conn)
     
     return ConversationHandler.END
-
 # ── MY REQUESTS ────────────────────────────────────────────────────────────────
 async def my_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show all requests for parent with option to post more"""

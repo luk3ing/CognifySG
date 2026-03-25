@@ -1,10 +1,11 @@
 """
-CognifySG — Production Bot v6 (PERFECTED)
+CognifySG — Production Bot v6 (FINAL)
 - Unlimited parent requests
 - Async operations for speed
 - Complete back buttons
 - Robust error handling
 - Optimized database queries
+- Reliable admin notifications
 """
 
 import os
@@ -17,7 +18,7 @@ import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler
@@ -110,13 +111,22 @@ def is_admin(uid):
     return bool(db.execute("SELECT 1 FROM admins WHERE user_id=%s", (uid,), fetch="one"))
 
 async def notify_admins(bot, text, markup=None):
+    """Notify all admins, fallback to super admin if no admins in DB."""
     admins = get_admins()
     if not admins:
         logger.warning("No admins registered. Set ADMIN_CHAT_ID env var.")
+        # Fallback to SUPER_ADMIN_ID if set
+        if SUPER_ADMIN_ID:
+            try:
+                await bot.send_message(SUPER_ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
+                logger.info(f"Notification sent to super admin {SUPER_ADMIN_ID}")
+            except Exception as e:
+                logger.error(f"Failed to notify super admin: {e}")
         return
     for aid in admins:
         try:
             await bot.send_message(aid, text, reply_markup=markup, parse_mode="Markdown")
+            logger.info(f"Notification sent to admin {aid}")
         except Exception as e:
             logger.warning(f"Notify admin {aid} failed: {e}")
 
@@ -957,58 +967,88 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     budget = clean_rate(txt)
     u = update.effective_user
 
+    # Show loading indicator
+    msg = await update.message.reply_text("⏳ Processing your request...")
+
     try:
-        req_id = db.execute(
-            "INSERT INTO requests (parent_id,username,name,phone,subject,level,areas,budget,approved) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING id",
-            (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
-             ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
-             ", ".join(ctx.user_data["p_area"]), budget),
-            fetch="id"
+        # Insert into database using direct connection for better error handling
+        conn = db.db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO requests (parent_id, username, name, phone, subject, level, areas, budget, approved) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1) RETURNING id
+                """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
+                      ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
+                      ", ".join(ctx.user_data["p_area"]), budget))
+                req_id = cur.fetchone()[0]
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Database insert failed: {e}")
+            await msg.edit_text("❌ Failed to save request. Please try again.")
+            return P_BUDGET
+        finally:
+            db.release(conn)
+        
+        # Delete loading message
+        await msg.delete()
+        
+        # Success message with back button (send this FIRST so user sees success)
+        kb = [[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="back_p")]]
+        
+        await update.message.reply_text(
+            hdr("✅", "Request Live") + "\n\n"
+            "Your request is now *live* and visible to tutors.\n\n" +
+            fld("Subject", ", ".join(ctx.user_data["p_subject"])) + "\n" +
+            fld("Level", ", ".join(ctx.user_data["p_level"])) + "\n" +
+            fld("Area", ", ".join(ctx.user_data["p_area"])) + "\n" +
+            fld("Budget", rate_str(budget)) + "\n\n" +
+            DIV2 + "\nOur team will contact you on *WhatsApp* once a tutor is matched.\n\n"
+            "You can post *another request* anytime from the dashboard.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
         )
+        
+        # Run background tasks (don't await - let them run in background)
+        async def background_tasks():
+            try:
+                # Log to sheets
+                await log_to_sheets_async(
+                    sheets.log_request, req_id, ctx.user_data["p_name"], ctx.user_data["p_phone"],
+                    u.username or "", ", ".join(ctx.user_data["p_subject"]),
+                    ", ".join(ctx.user_data["p_level"]), ", ".join(ctx.user_data["p_area"]), budget
+                )
+                await log_to_sheets_async(sheets.approve_request_sheet, req_id)
+            except Exception as e:
+                logger.error(f"Sheets logging failed: {e}")
+            
+            try:
+                # Notify admins
+                handle = "@" + u.username if u.username else "No username"
+                msg_text = (
+                    hdr("🆕", "New Parent Request") + "\n\n" +
+                    fld("Name", ctx.user_data["p_name"]) + "\n" +
+                    fld("WhatsApp", ctx.user_data["p_phone"]) + "\n" +
+                    fld("Telegram", handle) + "\n" +
+                    fld("Subject", ", ".join(ctx.user_data["p_subject"])) + "\n" +
+                    fld("Level", ", ".join(ctx.user_data["p_level"])) + "\n" +
+                    fld("Area", ", ".join(ctx.user_data["p_area"])) + "\n" +
+                    fld("Budget", rate_str(budget)) + "\n\n" +
+                    DIV2 + f"\n_Request #{req_id} — auto-approved and live._"
+                )
+                await notify_admins(update.get_bot(), msg_text)
+            except Exception as e:
+                logger.error(f"Admin notification failed: {e}")
+        
+        # Start background tasks
+        asyncio.create_task(background_tasks())
+        
     except Exception as e:
-        logger.error(f"Failed to create request: {e}")
-        await update.message.reply_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
+        logger.error(f"Unexpected error in p_budget: {e}")
+        await msg.edit_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
         return ConversationHandler.END
-
-    # Background tasks (non-blocking)
-    asyncio.create_task(log_to_sheets_async(
-        sheets.log_request, req_id, ctx.user_data["p_name"], ctx.user_data["p_phone"],
-        u.username or "", ", ".join(ctx.user_data["p_subject"]),
-        ", ".join(ctx.user_data["p_level"]), ", ".join(ctx.user_data["p_area"]), budget
-    ))
-    asyncio.create_task(log_to_sheets_async(sheets.approve_request_sheet, req_id))
-
-    # Notify admins in background
-    handle = "@" + u.username if u.username else "No username"
-    msg_text = (
-        hdr("🆕", "New Parent Request") + "\n\n" +
-        fld("Name", ctx.user_data["p_name"]) + "\n" +
-        fld("WhatsApp", ctx.user_data["p_phone"]) + "\n" +
-        fld("Telegram", handle) + "\n" +
-        fld("Subject", ", ".join(ctx.user_data["p_subject"])) + "\n" +
-        fld("Level", ", ".join(ctx.user_data["p_level"])) + "\n" +
-        fld("Area", ", ".join(ctx.user_data["p_area"])) + "\n" +
-        fld("Budget", rate_str(budget)) + "\n\n" +
-        DIV2 + f"\n_Request #{req_id} — auto-approved and live._"
-    )
-    asyncio.create_task(notify_admins(update.get_bot(), msg_text))
-
-    # Success message with back button
-    kb = [[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="back_p")]]
     
-    await update.message.reply_text(
-        hdr("✅", "Request Live") + "\n\n"
-        "Your request is now *live* and visible to tutors.\n\n" +
-        fld("Subject", ", ".join(ctx.user_data["p_subject"])) + "\n" +
-        fld("Level", ", ".join(ctx.user_data["p_level"])) + "\n" +
-        fld("Area", ", ".join(ctx.user_data["p_area"])) + "\n" +
-        fld("Budget", rate_str(budget)) + "\n\n" +
-        DIV2 + "\nOur team will contact you on *WhatsApp* once a tutor is matched.\n\n"
-        "You can post *another request* anytime from the dashboard.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
     return ConversationHandler.END
 
 async def my_reqs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2008,7 +2048,6 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── POST INIT ─────────────────────────────────────────────────────────────────
 async def post_init(app: Application):
     """Set bot commands so Telegram shows the menu button automatically."""
-    from telegram import BotCommand
     user_commands = [
         BotCommand("start",          "Open main menu"),
         BotCommand("profile",        "View your profile"),

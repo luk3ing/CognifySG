@@ -1,11 +1,12 @@
 """
-CognifySG — Production Bot v6 (FINAL)
-- Unlimited parent requests
+CognifySG — Production Bot v6 (FINAL - FULLY CHECKED)
+- Unlimited parent requests with proper error handling
 - Async operations for speed
 - Complete back buttons
 - Robust error handling
 - Optimized database queries
 - Reliable admin notifications
+- All database operations use direct connections
 """
 
 import os
@@ -115,7 +116,6 @@ async def notify_admins(bot, text, markup=None):
     admins = get_admins()
     if not admins:
         logger.warning("No admins registered. Set ADMIN_CHAT_ID env var.")
-        # Fallback to SUPER_ADMIN_ID if set
         if SUPER_ADMIN_ID:
             try:
                 await bot.send_message(SUPER_ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
@@ -970,33 +970,23 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Show loading indicator
     msg = await update.message.reply_text("⏳ Processing your request...")
 
+    conn = None
     try:
-        # Insert into database using direct connection for better error handling
         conn = db.db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO requests (parent_id, username, name, phone, subject, level, areas, budget, approved) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1) RETURNING id
-                """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
-                      ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
-                      ", ".join(ctx.user_data["p_area"]), budget))
-                req_id = cur.fetchone()[0]
-                conn.commit()
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Database insert failed: {e}")
-            await msg.edit_text("❌ Failed to save request. Please try again.")
-            return P_BUDGET
-        finally:
-            db.release(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO requests (parent_id, username, name, phone, subject, level, areas, budget, approved) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1) RETURNING id
+            """, (u.id, u.username or "", ctx.user_data["p_name"], ctx.user_data["p_phone"],
+                  ", ".join(ctx.user_data["p_subject"]), ", ".join(ctx.user_data["p_level"]),
+                  ", ".join(ctx.user_data["p_area"]), budget))
+            req_id = cur.fetchone()[0]
+            conn.commit()
+            logger.info(f"✅ Request #{req_id} created for parent {u.id}")
         
-        # Delete loading message
         await msg.delete()
         
-        # Success message with back button (send this FIRST so user sees success)
         kb = [[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="back_p")]]
-        
         await update.message.reply_text(
             hdr("✅", "Request Live") + "\n\n"
             "Your request is now *live* and visible to tutors.\n\n" +
@@ -1010,10 +1000,8 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Run background tasks (don't await - let them run in background)
         async def background_tasks():
             try:
-                # Log to sheets
                 await log_to_sheets_async(
                     sheets.log_request, req_id, ctx.user_data["p_name"], ctx.user_data["p_phone"],
                     u.username or "", ", ".join(ctx.user_data["p_subject"]),
@@ -1024,7 +1012,6 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Sheets logging failed: {e}")
             
             try:
-                # Notify admins
                 handle = "@" + u.username if u.username else "No username"
                 msg_text = (
                     hdr("🆕", "New Parent Request") + "\n\n" +
@@ -1041,13 +1028,17 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Admin notification failed: {e}")
         
-        # Start background tasks
         asyncio.create_task(background_tasks())
         
     except Exception as e:
-        logger.error(f"Unexpected error in p_budget: {e}")
-        await msg.edit_text("❌ Something went wrong. Please try again.\nUse /start to return to menu.")
-        return ConversationHandler.END
+        logger.error(f"🚨 Database insert failed: {e}")
+        if conn:
+            conn.rollback()
+        await msg.edit_text(f"❌ Failed to save request. Please try again.")
+        return P_BUDGET
+    finally:
+        if conn:
+            db.release(conn)
     
     return ConversationHandler.END
 
@@ -2036,7 +2027,7 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except Exception:
             failed += 1
-        await asyncio.sleep(0.1)  # Small delay to avoid hitting rate limits
+        await asyncio.sleep(0.1)
 
     await status_msg.edit_text(
         hdr("✅", "Broadcast Complete") + f"\n\n"

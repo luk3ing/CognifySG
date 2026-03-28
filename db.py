@@ -53,7 +53,9 @@ def execute(sql, params=(), fetch="none"):
             elif fetch == "all":
                 return cur.fetchall()
             elif fetch == "id":
-                return cur.fetchone()[0]
+                row = cur.fetchone()
+                # RealDictCursor returns a dict — grab first value regardless of key name
+                return list(row.values())[0]
     except Exception as e:
         conn.rollback()
         logger.error("DB error: %s | SQL: %s | Params: %s", e, sql, params)

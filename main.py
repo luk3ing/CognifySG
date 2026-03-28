@@ -76,8 +76,10 @@ ALL_SUBJECTS = [
     "Physics", "Chemistry", "Biology", "History", "Geography", "Literature",
 ]
 ALL_LEVELS = [
-    "Primary 1-3", "Primary 4-6", "Lower Sec", "Upper Sec",
-    "JC", "IB/IP", "Poly/ITE",
+    "Primary 1", "Primary 2", "Primary 3",
+    "Primary 4", "Primary 5", "Primary 6",
+    "Secondary 1", "Secondary 2", "Secondary 3", "Secondary 4",
+    "JC1", "JC2", "IB/IP", "Poly/ITE",
 ]
 ALL_AREAS = ["North", "South", "East", "West", "Central", "Online"]
 
@@ -1330,29 +1332,61 @@ async def p_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error("Sheets error: %s", e)
 
-        if TUTOR_CHANNEL_ID and BOT_USERNAME:
+        # ── DM matching tutors directly ────────────────────────────────────────
+        if BOT_USERNAME:
             masked_postal = postal[:2] + "xxxx" if len(postal) == 6 else postal
-            channel_text = (
+            req_subjects  = [s.strip().lower() for s in ctx.user_data["p_subject"]]
+            req_levels    = [l.strip().lower() for l in ctx.user_data["p_level"]]
+
+            # Fetch approved, available tutors whose areas overlap
+            matching_tutors = db.execute("""
+                SELECT user_id, subjects, levels, areas, rate
+                FROM tutors
+                WHERE approved=1 AND available=1
+            """, fetch="all")
+
+            apply_url    = "https://t.me/" + BOT_USERNAME + "?start=apply_" + str(req_id)
+            notify_text  = (
                 hdr("📋", "New Tuition Request") + "\n\n" +
                 fld("Subject", ", ".join(ctx.user_data["p_subject"])) + "\n" +
                 fld("Level",   ", ".join(ctx.user_data["p_level"])) + "\n" +
                 fld("Town",    town) + "\n" +
-                fld("Area",    masked_postal) + "\n" +
+                fld("Postal",  masked_postal) + "\n" +
                 fld("Budget",  rate_str(budget)) + "\n\n" +
-                DIV2 + "\n_Tap below to apply. Contact details shared only after match is confirmed._"
+                DIV2 + "\n_Contact details shared only after match is confirmed._"
             )
-            apply_url = "https://t.me/" + BOT_USERNAME + "?start=apply_" + str(req_id)
-            try:
-                await ctx.bot.send_message(
-                    TUTOR_CHANNEL_ID,
-                    channel_text,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("Apply Now ✅", url=apply_url)
-                    ]]),
-                    parse_mode="Markdown",
+            kb_apply = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Apply Now ✅", url=apply_url)
+            ]])
+
+            notified = 0
+            for t in (matching_tutors or []):
+                t_subj  = [s.strip().lower() for s in (t["subjects"] or "").split(",")]
+                t_lvl   = [l.strip().lower() for l in (t["levels"]   or "").split(",")]
+                t_areas = [a.strip().lower() for a in (t["areas"]    or "").split(",")]
+                req_area_lower = area.lower()
+
+                subj_match  = any(s in t_subj for s in req_subjects)
+                level_match = any(l in t_lvl  for l in req_levels)
+                area_match  = (
+                    req_area_lower in t_areas
+                    or "online" in t_areas
+                    or req_area_lower == "online"
                 )
-            except Exception as e:
-                logger.error("Channel broadcast failed: %s", e)
+
+                if subj_match and level_match and area_match:
+                    try:
+                        await ctx.bot.send_message(
+                            t["user_id"],
+                            notify_text,
+                            reply_markup=kb_apply,
+                            parse_mode="Markdown",
+                        )
+                        notified += 1
+                    except Exception as e:
+                        logger.warning("Could not DM tutor %s: %s", t["user_id"], e)
+
+            logger.info("New request #%s — notified %s matching tutors.", req_id, notified)
 
         handle   = "@" + u.username if u.username else "No username"
         admin_msg = (
